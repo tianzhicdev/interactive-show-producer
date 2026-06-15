@@ -1,0 +1,29 @@
+node_modules/
+dist/
+.wrangler/
+.env
+.env.local
+*.dev.vars
+.dev.vars
+*.log
+.DS_Store
+.gstack/
+.llm_cache/
+
+# Harness run artifacts (large; contain source-novel content) — never commit
+harness_output/
+
+# Local Claude Code / agent state
+.claude/
+.claude_cache/
+
+# stray empty scratch file
+n5
+
+# Python compiled artifacts
+__pycache__/
+*.pyc
+*.pyo
+
+# Large copyrighted reference PDFs (46MB) — kept out of history to stay lean
+docs/research/*.pdf

@@ -1,0 +1,5 @@
+#!/bin/bash
+# Prevent Mac from sleeping — even when lid is closed
+sudo pmset -a disablesleep 1
+echo "Sleep disabled. Mac will never sleep (even with lid closed)."
+echo "Run 'sleeps-if-closed' to restore normal behavior."

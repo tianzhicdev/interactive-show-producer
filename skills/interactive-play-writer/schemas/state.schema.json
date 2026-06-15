@@ -1,0 +1,295 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "state.schema.json",
+  "title": "SpineState",
+  "description": "Top-level project state for the interactive-play-writer pipeline. Contract between step-1, step-2, and step-3.",
+  "type": "object",
+  "required": ["version", "step", "bible", "registry", "spine"],
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "step": {
+      "type": "string",
+      "enum": ["step-1", "step-2", "step-3", "step-4"]
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "bible": { "$ref": "#/$defs/Bible" },
+    "registry": { "$ref": "#/$defs/Registry" },
+    "spine": { "$ref": "#/$defs/Spine" },
+    "highlights": {
+      "type": "array",
+      "items": { "type": "object", "additionalProperties": true }
+    },
+    "budget_report": {
+      "description": "Required when step >= step-2. Budget utilization data.",
+      "type": "object",
+      "additionalProperties": true
+    },
+    "chapter_index": {
+      "description": "Chapter-to-chunk mapping with highlight excerpts. Built in step-1 Phase 4.5.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["chapter_num", "chapter_title"],
+        "properties": {
+          "chapter_num": { "type": "integer" },
+          "chapter_title": { "type": "string" },
+          "chunk_indices": {
+            "type": "array",
+            "items": { "type": "integer" }
+          },
+          "highlight_excerpts": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "scripts": {
+      "description": "Per-node script text, keyed by node ID. Populated at step-3.",
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "validation_reports": {
+      "description": "Validation reports keyed by step (e.g. 'step-2', 'step-3').",
+      "type": "object",
+      "additionalProperties": { "type": "object" }
+    }
+  },
+  "if": {
+    "properties": { "step": { "enum": ["step-2", "step-3", "step-4"] } }
+  },
+  "then": {
+    "required": ["version", "step", "bible", "registry", "spine", "budget_report"],
+    "properties": {
+      "budget_report": {
+        "type": "object",
+        "required": ["total_authored_min", "playthrough_target_min", "total_budget_min", "node_count", "edge_count"],
+        "properties": {
+          "total_authored_min": { "type": "number" },
+          "playthrough_target_min": { "type": "number" },
+          "total_budget_min": { "type": "number" },
+          "node_count": { "type": "integer", "minimum": 1 },
+          "edge_count": { "type": "integer", "minimum": 1 },
+          "dead_end_count": { "type": "integer", "minimum": 0 },
+          "path_count": { "type": "integer", "minimum": 1 },
+          "per_segment": { "type": "object", "additionalProperties": true }
+        }
+      }
+    }
+  },
+  "additionalProperties": false,
+
+  "$defs": {
+    "RegistryVar": {
+      "type": "object",
+      "required": ["key", "type", "default"],
+      "properties": {
+        "key": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "type": { "type": "string", "enum": ["boolean", "enum", "bounded_int"] },
+        "default": {},
+        "values": {
+          "description": "Required for enum type. At least 2 values.",
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 2
+        },
+        "min_val": {
+          "description": "Required for bounded_int type.",
+          "type": "integer"
+        },
+        "max_val": {
+          "description": "Required for bounded_int type.",
+          "type": "integer"
+        },
+        "description": { "type": "string" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "boolean" } } },
+          "then": { "properties": { "default": { "type": "boolean" } } }
+        },
+        {
+          "if": { "properties": { "type": { "const": "enum" } } },
+          "then": {
+            "required": ["key", "type", "default", "values"],
+            "properties": { "default": { "type": "string" } }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "bounded_int" } } },
+          "then": {
+            "required": ["key", "type", "default", "min_val", "max_val"],
+            "properties": { "default": { "type": "integer" } }
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+
+    "Registry": {
+      "type": "object",
+      "required": ["vars"],
+      "properties": {
+        "vars": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/RegistryVar" }
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "Effect": {
+      "description": "State mutation on an edge: { key, op, value }.",
+      "type": "object",
+      "required": ["key", "op", "value"],
+      "properties": {
+        "key": { "type": "string" },
+        "op": { "type": "string", "enum": ["set", "add"] },
+        "value": {}
+      },
+      "additionalProperties": false
+    },
+
+    "Predicate": {
+      "description": "Condition on state: { key, cmp, value }. Used for requires and invariants.",
+      "type": "object",
+      "required": ["key", "cmp", "value"],
+      "properties": {
+        "key": { "type": "string" },
+        "cmp": { "type": "string", "enum": ["eq", "ne", "gt", "gte", "lt", "lte"] },
+        "value": {}
+      },
+      "additionalProperties": false
+    },
+
+    "Node": {
+      "description": "A node in the spine/DAG. ONE node = ONE episode = ~3 minutes.",
+      "type": "object",
+      "required": ["id", "kind"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "EP01, EP02, EP03A, DE01, etc."
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["scene", "bottleneck", "ending", "prologue"]
+        },
+        "title": { "type": "string" },
+        "summary": { "type": "string" },
+        "goal": { "type": "string" },
+        "duration_min": { "type": "number", "minimum": 0, "default": 3.0 },
+        "requires": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Predicate" }
+        },
+        "invariants": {
+          "description": "Bottleneck-only. Canon predicates checked on every incoming path.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/Predicate" }
+        },
+        "beats": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "choice_question": {
+          "type": "string",
+          "description": "Protagonist's dilemma, e.g. 苏锦该如何应对战王的试探？"
+        },
+        "chapter_range": {
+          "type": "string",
+          "description": "Source chapter range, e.g. 第1-5章"
+        },
+        "entry_context": {
+          "type": "string",
+          "description": "WHERE/WHEN this scene opens, e.g. 流放第二日·驿站·夜"
+        },
+        "exit_context": {
+          "type": "string",
+          "description": "WHERE/WHEN this scene ends, e.g. 驿站后院·深夜·颜如玉发现密信"
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "Edge": {
+      "description": "A directed edge in the spine/DAG.",
+      "type": "object",
+      "required": ["id", "src", "dst"],
+      "properties": {
+        "id": { "type": "string" },
+        "src": { "type": "string" },
+        "dst": { "type": "string" },
+        "label": {
+          "type": "string",
+          "description": "Choice text shown to player, <=8 CJK chars."
+        },
+        "effects": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Effect" }
+        },
+        "resolution": {
+          "type": "array",
+          "description": "2-5 beats showing the choice outcome and bridging to the next scene.",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "Spine": {
+      "type": "object",
+      "required": ["nodes", "edges", "entry_node"],
+      "properties": {
+        "nodes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Node" },
+          "minItems": 1
+        },
+        "edges": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Edge" }
+        },
+        "entry_node": {
+          "type": "string",
+          "description": "ID of the first node in the spine."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "Bible": {
+      "description": "Story bible: canon facts extracted from highlights.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "genre": { "type": "string" },
+        "tone": { "type": "string" },
+        "dramatic_question": { "type": "string" },
+        "protagonist": { "type": "object", "additionalProperties": true },
+        "characters": {
+          "type": "array",
+          "items": { "type": "object", "additionalProperties": true }
+        },
+        "world": { "type": "object", "additionalProperties": true },
+        "themes": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "canon_facts": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "source_chapters": { "type": "string" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

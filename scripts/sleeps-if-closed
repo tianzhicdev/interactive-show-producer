@@ -1,0 +1,4 @@
+#!/bin/bash
+# Restore normal sleep behavior — sleeps when lid is closed
+sudo pmset -a disablesleep 0
+echo "Normal sleep restored. Mac will sleep when lid is closed."

@@ -1,0 +1,34 @@
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+name = "tomato-api"
+
+[observability]
+enabled = true
+
+[env.production]
+name = "tomato-api"
+workers_dev = false
+routes = [
+  { pattern = "api.hudongju.net/*", zone_name = "hudongju.net" }
+]
+
+[env.production.vars]
+QUEUE_CONSUMER_CONCURRENCY = "5"
+QUEUE_RETRY_BASE_DELAY_SECONDS = "30"
+
+[[env.production.queues.producers]]
+binding = "BACKGROUND_QUEUE"
+queue = "tomato-pipeline"
+
+[[env.production.queues.consumers]]
+queue = "tomato-pipeline"
+max_batch_size = 25
+max_retries = 5
+visibility_timeout_ms = 660000
+max_batch_timeout = 1
+max_concurrency = 4
+retry_delay = 30
+
+[[env.production.r2_buckets]]
+binding = "STORY_BUCKET"
+bucket_name = "tomato-stories"

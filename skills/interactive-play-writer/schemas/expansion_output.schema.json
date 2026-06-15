@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "expansion_output.schema.json",
+  "title": "ExpansionOutput",
+  "description": "Schema for the LLM expansion output at step-2 (DFS expand).",
+  "type": "object",
+  "required": ["parent_beats", "parent_exit_context", "choice_question", "nodes", "edges"],
+  "properties": {
+    "parent_beats": {
+      "type": "array",
+      "description": "3-5 narrative beats for the source node, building to a tension peak.",
+      "items": { "type": "string" },
+      "minItems": 2
+    },
+    "parent_exit_context": {
+      "type": "string",
+      "description": "WHERE/WHEN the source node scene ends (e.g. 颜府门前·白天·颜如玉握紧拳头)."
+    },
+    "choice_question": {
+      "type": "string",
+      "description": "Protagonist's dilemma at the tension peak (≤30 chars Chinese)."
+    },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "kind", "title", "summary", "goal", "duration_min", "entry_context", "beats"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^(EP\\d+[A-Z]?|DE\\d+)$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": ["scene", "bottleneck", "ending", "prologue"]
+          },
+          "title": { "type": "string" },
+          "summary": { "type": "string" },
+          "goal": { "type": "string" },
+          "duration_min": { "type": "number", "minimum": 0 },
+          "requires": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["key", "cmp", "value"],
+              "properties": {
+                "key": { "type": "string" },
+                "cmp": { "type": "string", "enum": ["eq", "ne", "gt", "gte", "lt", "lte"] },
+                "value": {}
+              }
+            }
+          },
+          "invariants": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["key", "cmp", "value"],
+              "properties": {
+                "key": { "type": "string" },
+                "cmp": { "type": "string" },
+                "value": {}
+              }
+            }
+          },
+          "entry_context": { "type": "string" },
+          "exit_context": { "type": "string" },
+          "beats": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "choice_question": { "type": "string" },
+          "chapter_range": { "type": "string" }
+        },
+        "additionalProperties": false
+      },
+      "minItems": 1
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "src", "dst", "label", "resolution"],
+        "properties": {
+          "id": { "type": "string" },
+          "src": { "type": "string" },
+          "dst": { "type": "string" },
+          "label": {
+            "type": "string",
+            "description": "Player action choice text, ≤8 CJK chars."
+          },
+          "effects": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["key", "op", "value"],
+              "properties": {
+                "key": { "type": "string" },
+                "op": { "type": "string", "enum": ["set", "add"] },
+                "value": {}
+              }
+            }
+          },
+          "resolution": {
+            "type": "array",
+            "description": "2-5 beats showing choice outcome and bridging to next scene.",
+            "items": { "type": "string" },
+            "minItems": 1,
+            "maxItems": 5
+          }
+        },
+        "additionalProperties": false
+      },
+      "minItems": 2
+    }
+  },
+  "additionalProperties": false
+}
