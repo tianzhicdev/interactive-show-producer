@@ -1,13 +1,6 @@
 # Rotating story set for the real --mini eval (one path per line; # = comment).
-# --mini only reads chapters 1-2, so any novel file works as a fixture.
-# Keep 2-4 DIFFERENT GENRES here so the loop can't overfit to one story.
-# Paths may be absolute or repo-relative. Missing paths are skipped (with a warning).
-
-# romance / transmigration (committed fixture)
-harness/fixtures/tijiawangfei_10ch.txt
-
-# horror / death-game
-/Users/biubiu/Downloads/番茄IP互动剧本/raw_stories/灵异复苏_第1-34章.txt
-
-# xianxia / cultivation
-/Users/biubiu/Downloads/番茄IP互动剧本/raw_stories/凡人仙葫_ch1-80.txt
+# Keep SHORT (≈3 chapters): --mini extracts the whole-file bible before building
+# from ch 1-2, so long files make every iteration slow. Missing paths are skipped.
+loop/fixtures/romance_3ch.txt
+loop/fixtures/horror_3ch.txt
+loop/fixtures/xianxia_3ch.txt
