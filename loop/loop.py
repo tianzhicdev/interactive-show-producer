@@ -130,6 +130,32 @@ def schema_edit_violation(diff_text):
     return bad
 
 
+def guard_violation(files, diff):
+    """Return a reason string if a change touches protected files / schema / gate-H,
+    else None. Used both per-item (drop the offending item) and on any diff."""
+    prot = touches_protected(files)
+    if prot:
+        return "protected:" + ",".join(prot)
+    gh = gate_h_violation(diff)
+    if gh:
+        return "gate-H:" + "; ".join(gh[:2])
+    sch = schema_edit_violation(diff)
+    if sch:
+        return "schema-edit:" + "; ".join(sch[:2])
+    return None
+
+
+def targets_all_protected(item):
+    """True if EVERY declared target_file is protected — skip applying it (saves an
+    opencode call) since the guard would reject it anyway. (A real edit may differ, so
+    this only fires when the proposer itself says it will only touch protected files.)"""
+    tf = item.get("target_files") or []
+    if not isinstance(tf, list) or not tf:
+        return False
+    globs = protected_globs()
+    return all(any(fnmatch.fnmatch(str(f), g) for g in globs) for f in tf)
+
+
 # ---------- verification ----------
 
 def _pytest(timeout):
@@ -301,6 +327,7 @@ def propose_plan(context, n=6, attempts=3):
     Returns a list of item dicts: {title, category, target_files, change, rationale,
     expected_impact, priority}. Retries on a transient empty/unparseable response so a
     single flaky opencode call doesn't end the whole loop."""
+    protected_list = "\n".join(f"    {g}" for g in protected_globs())
     prompt = f"""You are improving the `harness/` interactive-story generation engine. Read
 harness/AGENTS.md and the context below, examine the relevant harness/ code, and propose
 a RANKED PLAN of EVERY change you consider important enough to be worth doing now.
@@ -318,9 +345,14 @@ Rank by importance (priority 1 = do first). Prefer high-impact items. It is fine
 return just 1–3 items if only those are truly worth doing.
 
 HARD CONSTRAINTS every item must respect (state how in "change"):
-- Edit ONLY harness/ source. NEVER tests, validators, JSON schemas, the grading .md files, or loop/.
+- Edit ONLY harness/ source. These files are PROTECTED — do NOT target them (an item
+  that does is dropped without being tried, wasting the slot):
+{protected_list}
 - NEVER change the JSON schema (`_*_SCHEMA`/minItems/required/enum/properties in llm.py) or the
   eval criteria (loop/quality_eval.md). NEVER hardcode story content. NEVER weaken a test/validator.
+- The editable generation dials are: harness/CREATIVE_WRITING_PROSE.md,
+  harness/CREATIVE_WRITING_SKELETON.md, the prompt builders in harness/llm.py (NOT its
+  schemas) and harness/metadata_fill.py, plus any harness/ source for speed/refactor/robustness.
 
 CONTEXT (last eval deficiencies + backlog + already-tried + recent failures to learn from):
 {context}
@@ -422,6 +454,138 @@ def revert_worktree():
     git("clean", "-fd", "harness")
 
 
+# ---------- bundle + bisect (apply the whole plan, keep the maximal good subset) ----------
+
+def apply_plan_as_commits(base, plan, ledger_append, rnd):
+    """Apply EVERY plan item from `base`, each as its own commit (cumulative). Returns a
+    list of metas: {item, idx, commit, files, violation}. Items that the proposer says
+    target only protected files, that the agent leaves as a no-op, or that introduce a
+    guard violation are recorded (violation set) and excluded from the kept-subset search
+    — their failure is logged so the next plan learns. The tree ends at the last commit."""
+    git("reset", "--hard", base); git("clean", "-fd", "harness")
+    metas = []
+    for idx, item in enumerate(plan):
+        if targets_all_protected(item):
+            ledger_append({"round": rnd, "title": _item_text(item), "category": item.get("category"),
+                           "verdict": "rejected", "reason": "protected-target",
+                           "detail": str(item.get("target_files"))[:200]})
+            continue
+        before = git("rev-parse", "HEAD")[1].strip()
+        apply_change(item)
+        files = changed_files()
+        if not files:
+            ledger_append({"round": rnd, "title": _item_text(item), "verdict": "noop"})
+            continue
+        _, diff = git("diff", "HEAD")
+        violation = guard_violation(files, diff)
+        git("add", "-A")
+        git("commit", "-q", "-m", f"round {rnd} item {idx}: {_item_text(item)}")
+        commit = git("rev-parse", "HEAD")[1].strip()
+        if violation:
+            # roll this item back out of the cumulative line so it can't taint the rest
+            git("reset", "--hard", before); git("clean", "-fd", "harness")
+            ledger_append({"round": rnd, "title": _item_text(item), "category": item.get("category"),
+                           "files": files, "verdict": "rejected", "reason": violation})
+            continue
+        metas.append({"item": item, "idx": idx, "commit": commit, "files": files})
+    return metas
+
+
+def group_by_files(metas):
+    """Group metas that edit overlapping files (union-find). File-disjoint groups can be
+    cherry-picked in any combination WITHOUT conflicts — that's what makes bisection safe
+    even though items were applied cumulatively. Returns list of groups (each a meta list,
+    kept in original idx order)."""
+    parent = list(range(len(metas)))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]; x = parent[x]
+        return x
+
+    def union(a, b):
+        parent[find(a)] = find(b)
+
+    for i in range(len(metas)):
+        for j in range(i + 1, len(metas)):
+            if set(metas[i]["files"]) & set(metas[j]["files"]):
+                union(i, j)
+    groups = {}
+    for i, m in enumerate(metas):
+        groups.setdefault(find(i), []).append(m)
+    return [sorted(g, key=lambda m: m["idx"]) for g in groups.values()]
+
+
+def _accept(metas, new, prev_mean, prev_per, eps):
+    """Category-aware acceptance for a subset: plot/bug-fix must improve-or-hold the mean;
+    a pure-engineering subset need only NOT regress (mean >= best-ε). Floor always holds."""
+    floor_ok = all(new["per_story"].get(f, 0.0) >= prev_per.get(f, 0.0) - eps
+                   for f in new["per_story"])
+    is_plot = any(m["item"].get("category") in PLOT_CATS for m in metas)
+    quality_ok = (new["mean"] >= prev_mean) if is_plot else (new["mean"] >= prev_mean - eps)
+    return quality_ok and floor_ok
+
+
+def bisect_groups(base, groups, evaluate_subset, prev_mean, prev_per, eps, max_tests=8):
+    """Find the largest set of file-disjoint groups whose combined change is ACCEPTED.
+    evaluate_subset(metas) -> (err, new): err is a string if tests/mini broke (or a
+    cherry-pick conflict), else None with `new` = the eval dict. Tries the whole set
+    first (the common, fast path = 1 eval); on failure splits and recurses, re-testing
+    each new union to catch interactions. Memoized by item-set so no subset is ever
+    evaluated twice; bounded by max_tests *distinct* evals."""
+    budget = [max_tests]
+    memo = {}
+
+    def flat(gs):
+        return [m for g in gs for m in g]
+
+    def key(gs):
+        return frozenset(m["idx"] for m in flat(gs))
+
+    def test(gs):
+        k = key(gs)
+        if k in memo:
+            return memo[k]          # already evaluated this exact subset — free
+        if budget[0] <= 0:
+            return "budget", None   # out of eval budget → treat as fail (conservative)
+        budget[0] -= 1
+        memo[k] = evaluate_subset(flat(gs))
+        return memo[k]
+
+    def ok(gs, res):
+        err, new = res
+        return err is None and _accept(flat(gs), new, prev_mean, prev_per, eps)
+
+    def score(res):
+        return res[1]["mean"] if res and res[1] else -1e9
+
+    def rec(gs):
+        if not gs:
+            return [], None
+        res = test(gs)
+        if ok(gs, res):
+            return gs, res[1]
+        if len(gs) == 1:
+            return [], None         # a single group that doesn't hold on its own → drop it
+        mid = len(gs) // 2
+        L, lnew = rec(gs[:mid])
+        R, rnew = rec(gs[mid:])
+        union = L + R
+        if not union:
+            return [], None
+        if L and R and len(union) < len(gs):   # a genuinely new combination → test it
+            ures = test(union)
+            if ok(union, ures):
+                return union, ures[1]
+        # union interacts badly (or equals gs) → keep the better passing half
+        lr, rr = (None, lnew), (None, rnew)
+        if L and R:
+            return (L, lnew) if score(lr) >= score(rr) else (R, rnew)
+        return (L, lnew) if L else (R, rnew)
+
+    return rec(groups)
+
+
 def main():
     # Never orphan mini subprocesses if the loop is interrupted/killed.
     atexit.register(_kill_active_minis)
@@ -479,116 +643,99 @@ def main():
     if a.dry_run:
         print("[loop] dry-run: baseline only, exiting."); return
 
-    # Work queue: the proposer surfaces ALL critical items up front (plan.json); the
-    # loop applies ONE per iteration (attributable + revertable) and refreshes the plan
-    # when the queue drains. A rejected item's failure detail is fed back via the ledger.
-    plan = load_json(STATE / "plan.json", [])
-
-    def save_plan():
+    # Each ROUND: propose the full plan → apply EVERY item (cumulative commits) → drop
+    # guard-violating / no-op / protected-target items → group file-disjoint items →
+    # BISECT for the maximal subset that holds quality → commit it. Bundle holds ⇒ 1 eval
+    # (fast, reaches the big items); only a regression triggers bisection (extra evals) to
+    # isolate and drop the culprit while keeping the rest. Failures feed the next plan.
+    def save_plan(plan):
         (STATE / "plan.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2))
 
-    def reject(it, item, reason, files=None, detail="", **extra):
-        print(f"[loop] REJECT ({reason}) — reverting" + (f"\n{str(detail)[:400]}" if detail else ""))
-        revert_worktree()
-        ledger_append({"iter": it, "title": _item_text(item), "category": item.get("category"),
-                       "files": files or item.get("target_files"),
-                       "verdict": "rejected", "reason": reason, "detail": str(detail)[:600], **extra})
-
     no_improve = 0
-    for it in range(1, a.max_iters + 1):
+    for rnd in range(1, a.max_iters + 1):
         if no_improve >= a.patience:
-            print(f"[loop] converged: {a.patience} iterations with no improvement."); break
+            print(f"[loop] converged: {a.patience} rounds with no quality improvement."); break
+        base = git("rev-parse", "HEAD")[1].strip()
 
-        # STEP 1 — PROPOSE A PLAN when the queue is empty (opencode-qwen, read-only).
-        # All critical items are surfaced at once; failures feed back into the next plan.
+        ctx = build_context(last_defs, ledger)
+        plan = propose_plan(ctx)
         if not plan:
-            ctx = build_context(last_defs, ledger)
-            plan = propose_plan(ctx)
-            save_plan()
-            if not plan:
-                print("[loop] proposer returned no actionable items; stopping."); break
-            print(f"[loop] new plan ({len(plan)} items): " +
-                  " | ".join(_item_text(p) for p in plan))
-            ledger_append({"iter": it, "verdict": "plan", "items": [_item_text(p) for p in plan]})
+            print("[loop] proposer returned no actionable items; stopping."); break
+        save_plan(plan)
+        print(f"\n===== round {rnd}/{a.max_iters} (best_mean={best.get('mean')}, "
+              f"no_improve={no_improve}) =====")
+        print(f"[loop] plan ({len(plan)} items): " + " | ".join(_item_text(p) for p in plan))
+        ledger_append({"round": rnd, "verdict": "plan", "items": [_item_text(p) for p in plan]})
 
-        item = plan.pop(0); save_plan()
-        print(f"\n===== iteration {it}/{a.max_iters} (best_mean={best.get('mean')}, "
-              f"no_improve={no_improve}) =====\n[loop] item: {_item_text(item)}")
+        # Apply every item as its own cumulative commit; drop violators/no-ops.
+        metas = apply_plan_as_commits(base, plan, ledger_append, rnd)
+        git("reset", "--hard", base); git("clean", "-fd", "harness")
+        if not metas:
+            print("[loop] no applicable items (all protected-target / no-op / guard) — next round.")
+            no_improve += 1; continue
 
-        # STEP 2 — APPLY one item (opencode-qwen, edits enabled).
-        # Judge only what the AGENT changed: subtract files already dirty before apply
-        # (e.g. the loop's own save_plan() write of plan.json) so the loop's bookkeeping
-        # can never trip the protected-files guard. (plan/best/ledger are also gitignored.)
-        pre = set(changed_files())
-        apply_change(item)
-        files = [f for f in changed_files() if f not in pre]
-        if not files:
-            print("[loop] apply made no change; skipping."); no_improve += 1
-            ledger_append({"iter": it, "title": _item_text(item), "verdict": "noop"}); continue
+        # Group file-disjoint items so any subset can be cherry-picked conflict-free.
+        groups = group_by_files(metas)
+        prev_mean = best.get("mean", 0.0); prev_per = best.get("per_story", {})
+        print(f"[loop] {len(metas)} item(s) in {len(groups)} disjoint group(s); "
+              f"applying the bundle and bisecting if it regresses...")
 
-        # 3. GUARD: protected files + gate H + schema lock
-        prot = touches_protected(files)
-        _, diff = git("diff", "HEAD")
-        gh = gate_h_violation(diff)
-        sch = schema_edit_violation(diff)
-        if prot or gh or sch:
-            reason = (("protected:" + ",".join(prot)) if prot
-                      else ("gate-H:" + "; ".join(gh[:2])) if gh
-                      else ("schema-edit:" + "; ".join(sch[:2])))
-            reject(it, item, reason, files=files); no_improve += 1; continue
-
-        # 4. VERIFY-FAST (tests/fake). The full failure summary is logged so the next
-        #    plan can see exactly what broke and self-correct.
-        ok, summ = fast_verify()
-        if not ok:
-            reject(it, item, "tests", files=files, detail=summ); no_improve += 1; continue
-
-        # 5. VERIFY-REAL: all fixtures in parallel → mean + per-story scores
-        if a.fast_only:
-            new = {"mean": best.get("mean", 0.0), "per_story": best.get("per_story", {}),
-                   "deficiencies": last_defs, "failed": []}
-        else:
+        def evaluate_subset(subset_metas):
+            """Reset to base, cherry-pick this subset (file-disjoint ⇒ no conflicts),
+            verify + eval. Returns (err, new); err set on conflict / tests / mini fail."""
+            git("reset", "--hard", base); git("clean", "-fd", "harness")
+            for m in sorted(subset_metas, key=lambda m: m["idx"]):
+                rc, _ = git("cherry-pick", m["commit"])
+                if rc != 0:
+                    git("cherry-pick", "--abort")
+                    return "cherry-pick-conflict", None
+            ok, summ = fast_verify()
+            if not ok:
+                return "tests:" + summ[-200:], None
+            if a.fast_only:
+                return None, {"mean": prev_mean, "per_story": prev_per,
+                              "deficiencies": last_defs, "failed": []}
             new = real_eval_all(fixtures, a.model, not a.no_judge)
-            if new["failed"]:  # a change that breaks ANY genre's pipeline = reject
-                reject(it, item, "mini-failed", files=files, detail=new["failed"],
-                       per_story=new["per_story"]); no_improve += 1; continue
+            if new["failed"]:
+                return "mini-failed:" + str(new["failed"]), None
+            return None, new
 
-        # 6. ACCEPTANCE — category-aware (see PLOT_CATS / ENG_CATS):
-        #    plot/bug-fix must improve-or-hold the mean; engineering changes need only
-        #    NOT regress quality (mean >= best-ε, floor holds) — their benefit is the
-        #    proposer's claim, verified by a human before merge.
-        prev_mean = best.get("mean", 0.0)
-        prev_per = best.get("per_story", {})
-        is_plot = item.get("category") in PLOT_CATS
-        floor_ok = all(new["per_story"].get(f, 0.0) >= prev_per.get(f, 0.0) - a.epsilon
-                       for f in new["per_story"])
-        quality_ok = (new["mean"] >= prev_mean) if is_plot else (new["mean"] >= prev_mean - a.epsilon)
+        kept_groups, new = bisect_groups(base, groups, evaluate_subset,
+                                         prev_mean, prev_per, a.epsilon)
+        kept = sorted([m for g in kept_groups for m in g], key=lambda m: m["idx"])
+        kept_idx = {m["idx"] for m in kept}
+        dropped = [m for m in metas if m["idx"] not in kept_idx]
 
-        if quality_ok and floor_ok:
-            git("add", "-A")
-            git("commit", "-q", "-m",
-                f"loop iter {it}: {_item_text(item)} (mean {new['mean']} vs {prev_mean})")
-            commit = git("rev-parse", "HEAD")[1].strip()
-            if new["mean"] > prev_mean:  # quality improvement → raise the bar
-                best = {"mean": new["mean"], "per_story": new["per_story"], "commit": commit,
-                        "deficiencies": new["deficiencies"]}
-                last_defs = new["deficiencies"]
-            else:                        # engineering / neutral hold → keep the bar, log commit
-                best["commit"] = commit
-            save_best()
-            print(f"[loop] ACCEPT [{item.get('category')}] — mean {new['mean']} "
-                  f"(per_story {new['per_story']}), committed {commit[:8]}.")
-            ledger_append({"iter": it, "title": _item_text(item), "category": item.get("category"),
-                           "files": files, "verdict": "accepted", "commit": commit,
+        # Finalize: rebuild the kept subset cleanly on base.
+        git("reset", "--hard", base); git("clean", "-fd", "harness")
+        if not kept or new is None:
+            print(f"[loop] REJECT round {rnd}: no subset held quality — staying at {base[:8]}.")
+            ledger_append({"round": rnd, "verdict": "rejected", "reason": "no-subset-held",
+                           "tried": [_item_text(m["item"]) for m in metas]})
+            no_improve += 1; continue
+        for m in kept:
+            git("cherry-pick", m["commit"])
+        commit = git("rev-parse", "HEAD")[1].strip()
+        print(f"[loop] ACCEPT round {rnd}: kept {len(kept)}/{len(metas)} item(s) "
+              f"(mean {new['mean']} vs {prev_mean}, per_story {new['per_story']}); "
+              f"dropped {len(dropped)}; committed {commit[:8]}.")
+        if new["mean"] > prev_mean:        # quality improvement → raise the bar, reset patience
+            best = {"mean": new["mean"], "per_story": new["per_story"], "commit": commit,
+                    "deficiencies": new["deficiencies"]}
+            last_defs = new["deficiencies"]; no_improve = 0
+        else:                              # engineering / neutral hold → keep bar, count toward patience
+            best["commit"] = commit; no_improve += 1
+        save_best()
+        for m in kept:
+            ledger_append({"round": rnd, "title": _item_text(m["item"]),
+                           "category": m["item"].get("category"), "files": m["files"],
+                           "verdict": "accepted", "commit": commit,
                            "mean": new["mean"], "per_story": new["per_story"]})
-            no_improve = 0  # any accepted improvement is progress
-        else:
-            reason = "regress-mean" if new["mean"] < prev_mean - (0 if is_plot else a.epsilon) \
-                     else "per-story-floor"
-            reject(it, item, reason, files=files,
-                   detail=f"mean {new['mean']} vs {prev_mean}, per_story {new['per_story']}",
-                   mean=new["mean"], per_story=new["per_story"])
-            no_improve += 1
+        for m in dropped:
+            ledger_append({"round": rnd, "title": _item_text(m["item"]),
+                           "category": m["item"].get("category"), "files": m["files"],
+                           "verdict": "rejected", "reason": "bisected-out",
+                           "detail": f"regressed or broke tests inside the bundle (target mean {prev_mean})"})
 
     print(f"\n[loop] done. best mean = {best.get('mean')} on {best.get('commit','')[:8]} "
           f"(branch {a.branch}). Review and merge manually.")
