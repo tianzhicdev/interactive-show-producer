@@ -227,6 +227,7 @@ skeleton 节拍中也不可暗示 invariant 事实发生了变化。
 - 不要翻转不变量
 - 不要在有注册表 ID 的情况下发明新名字
 - 不要在 skeleton 节拍中引用 `produces`/`requires` 中未声明的内容
+- 不要在 skeleton 的 narration 节拍中交代主角身份/前史/能力来源（这些必须靠 action/dialogue + 他人反应演出）
 - 不要引用 `varying_DO_NOT_REFERENCE` 中的事实
 
 ---
