@@ -717,18 +717,20 @@ def main():
         r = real_eval_all(fixtures, a.model, not a.no_judge)
         best = {"mean": r["mean"], "per_story": r["per_story"],
                 "commit": git("rev-parse", "HEAD")[1].strip(), "deficiencies": r["deficiencies"]}
-        if full_fixtures:
-            print(f"[loop] establishing full-run baseline ({len(full_fixtures)} fixture(s))...")
-            fr = real_eval_full_all(full_fixtures, a.model)
-            best["full_mean"] = fr["mean"]
-            best["full_per_story"] = fr["per_story"]
-            best["full_deficiencies"] = fr["deficiencies"]
         save_best()
         print(f"[loop] baseline mean={best['mean']} per_story={best['per_story']}")
-        if full_fixtures:
-            print(f"[loop] baseline full_mean={best.get('full_mean')} full_per_story={best.get('full_per_story')}")
     last_defs = best.get("deficiencies", [])
     last_full_defs = best.get("full_deficiencies", [])
+
+    if full_fixtures and "full_mean" not in best and not a.fast_only:
+        print(f"[loop] establishing full-run baseline ({len(full_fixtures)} fixture(s))...")
+        fr = real_eval_full_all(full_fixtures, a.model)
+        best["full_mean"] = fr["mean"]
+        best["full_per_story"] = fr["per_story"]
+        best["full_deficiencies"] = fr["deficiencies"]
+        last_full_defs = fr["deficiencies"]
+        save_best()
+        print(f"[loop] baseline full_mean={best.get('full_mean')} full_per_story={best.get('full_per_story')}")
 
     if a.dry_run:
         print("[loop] dry-run: baseline only, exiting."); return
