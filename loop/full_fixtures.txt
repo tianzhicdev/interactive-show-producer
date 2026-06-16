@@ -1,3 +1,6 @@
 # Full-run regression set for long-horizon harness health.
-# Keep this small: these runs are expensive compared with --mini.
-harness/fixtures/tijiawangfei_10ch.txt
+# Format: <story path>|<optional chapter range>
+# Keep this small; these runs are expensive compared with --mini.
+/Users/biubiu/Downloads/番茄IP互动剧本/raw_stories/凡人仙葫.txt|1-100
+/Users/biubiu/Downloads/番茄IP互动剧本/raw_stories/全球电竞时代，我是唯一作弊玩家.txt|1-100
+/Users/biubiu/Downloads/番茄IP互动剧本/raw_stories/灵异复苏，永夜降临.txt|1-100

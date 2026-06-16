@@ -73,8 +73,9 @@ def _node_needs_fill(node: Node) -> bool:
         isinstance(el, dict) and el.get("role") for el in node.skeleton
     )
     missing_gap = not (node.expectation and node.result)
+    missing_turning = not (node.turning_type and node.turning_type in ("action", "revelation"))
     return (missing_charges or missing_impacts or missing_roles
-            or missing_gap or not node.tension)
+            or missing_gap or missing_turning or not node.tension)
 
 
 def _fill_one(node: Node, goals: list[dict], params: Params,
@@ -94,7 +95,7 @@ def _fill_one(node: Node, goals: list[dict], params: Params,
 - expectation/result：主角预期 vs 实际发生（必须偏离——这是场景的 Gap）。
 - opening_charge/closing_charge：本场开/收时主角处境的价值极性，必须不同（场要翻转）。
 - 节奏交替：若给出了"前节点收尾极性"，本场收尾尽量与其交替（连续三场同极性=单调）。
-- turning_type：翻转靠行动(action)还是靠揭示(revelation)。
+- turning_type：翻转靠行动(action)还是靠揭示(revelation)。非结尾节点必须是"action"或"revelation"（不能留空）。
 - tension：1-5，爽点/危机峰值为4-5。
 - beat_roles：与骨架节拍数组一一对应（含scene_header，可填""）。非结局节点
   最后一个有内容的节拍标 decision_trigger（逼出选择问题的事件）；爽点标 payoff。

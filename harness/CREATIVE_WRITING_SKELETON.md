@@ -196,6 +196,8 @@ skeleton 节拍中也不可暗示 invariant 事实发生了变化。
 
 **节拍职能标注（role 字段）**：每个骨架节拍标注其戏剧职能 `role: buildup|payoff|surprise|decision_trigger|recap|preparation|aftermath`。非结局节点的**最后一个节拍必须是 `decision_trigger`**（就是逼出 question 的那个事件）；爽点节拍标 `payoff`；汇合节点开场节拍标 `recap`。验证器据此机械检查"选择是否挂在张力顶点"。
 
+**场景翻转要求（强制）**：非结尾节点必须有**场景 Gap**——主角预期（expectation）与实际结果（result）必须相反或偏离，形成 Dramatic Gap。这个 Gap 必须由 `decision_trigger` 节拍体现：该节拍是逼出 question 的事件，直接导致预期落空或反转。**非结尾节点的 skeleton 最后一个节拍必须是 `decision_trigger`**，且对应的元数据 `turning_type` 必须是 `"action"` 或 `"revelation"`（不能留空），`opening_charge` 与 `closing_charge` 必须相反（`+`→`-` 或 `-`→`+`），否则节点会被拒绝。
+
 ### 五种张力模式（至少用一种）——但都必须满足"两个正向收获"底线
 
 1. **竞争性收益（首选）**：两个选项各争取一个玩家都想要的好处，互为机会成本

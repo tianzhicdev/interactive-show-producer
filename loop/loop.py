@@ -273,52 +273,63 @@ def real_eval_all(fixtures, model, use_judge):
     return {"mean": mean, "per_story": per_story, "deficiencies": deficiencies, "failed": failed}
 
 
+def _run_full_fixture(story, chapters, model):
+    """Run one full fixture and score it with the deterministic report card."""
+    from loop.eval import evaluate_full
+
+    safe = re.sub(r"[^A-Za-z0-9]+", "_", os.path.basename(story))[:40]
+    logpath = STATE / f"full_{safe}.log"
+    env = {**os.environ, "HARNESS_PROSE_WORKERS": "1", "HARNESS_INGEST_WORKERS": "1"}
+    cmd = [sys.executable, "-m", "harness", story]
+    if chapters:
+        cmd += ["--chapters", chapters]
+    cmd += ["--playthrough", "55", "--total", "100", "--min-endings", "3",
+            "--model", model, "--no-upload"]
+    lf = open(logpath, "w")
+    p = subprocess.Popen(cmd, cwd=ROOT, stdout=lf, stderr=subprocess.STDOUT,
+                         text=True, env=env, start_new_session=True)
+    _ACTIVE_MINIS.append(p)
+    try:
+        p.wait(timeout=7200)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        try:
+            p.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            pass
+    lf.close()
+    _ACTIVE_MINIS[:] = [x for x in _ACTIVE_MINIS if x.pid != p.pid]
+    out = Path(logpath).read_text()
+    label = os.path.basename(story)
+    if p.returncode != 0:
+        return story, 0.0, [f"[{label}] full run FAILED"], True
+    m = re.findall(r"harness_output/run_[0-9_]+", out)
+    run_dir = m[-1] if m else None
+    gf = os.path.join(ROOT, run_dir, "graph_final.json") if run_dir else ""
+    if not run_dir or not os.path.exists(gf):
+        return story, 0.0, [f"[{label}] no graph_final.json"], True
+    res = evaluate_full(os.path.join(ROOT, run_dir))
+    return story, res["score"] if res["score"] is not None else 0.0, \
+        [f"[{label}] {d}" for d in res["deficiencies"]], False
+
+
 def real_eval_full_all(fixtures, model):
     """Run the full regression set and score each run with the deterministic
     full-run report card."""
-    from loop.eval import evaluate_full
+    from concurrent.futures import ThreadPoolExecutor
 
     per_story, deficiencies, failed = {}, [], []
-    for story in fixtures:
-        safe = re.sub(r"[^A-Za-z0-9]+", "_", os.path.basename(story))[:40]
-        logpath = STATE / f"full_{safe}.log"
-        env = {**os.environ, "HARNESS_PROSE_WORKERS": "1", "HARNESS_INGEST_WORKERS": "1"}
-        cmd = [sys.executable, "-m", "harness", story,
-               "--playthrough", "55", "--total", "100", "--min-endings", "3",
-               "--model", model,
-               "--no-upload"]
-        lf = open(logpath, "w")
-        p = subprocess.Popen(cmd, cwd=ROOT, stdout=lf, stderr=subprocess.STDOUT,
-                             text=True, env=env, start_new_session=True)
-        _ACTIVE_MINIS.append(p)
-        try:
-            p.wait(timeout=7200)
-        except subprocess.TimeoutExpired:
-            p.kill()
-            try:
-                p.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                pass
-        lf.close()
-        _ACTIVE_MINIS[:] = [x for x in _ACTIVE_MINIS if x.pid != p.pid]
-        out = Path(logpath).read_text()
-        if p.returncode != 0:
-            failed.append(story)
-            per_story[story] = 0.0
-            deficiencies.append(f"[{os.path.basename(story)}] full run FAILED")
-            continue
-        m = re.findall(r"harness_output/run_[0-9_]+", out)
-        run_dir = m[-1] if m else None
-        gf = os.path.join(ROOT, run_dir, "graph_final.json") if run_dir else ""
-        if not run_dir or not os.path.exists(gf):
-            failed.append(story)
-            per_story[story] = 0.0
-            deficiencies.append(f"[{os.path.basename(story)}] no graph_final.json")
-            continue
-        res = evaluate_full(os.path.join(ROOT, run_dir))
-        base = os.path.basename(story)
-        per_story[story] = res["score"] if res["score"] is not None else 0.0
-        deficiencies += [f"[{base}] {d}" for d in res["deficiencies"]]
+    if not fixtures:
+        return {"mean": 0.0, "per_story": per_story, "deficiencies": deficiencies, "failed": failed}
+    with ThreadPoolExecutor(max_workers=min(3, len(fixtures))) as pool:
+        futs = [pool.submit(_run_full_fixture, fx["path"], fx.get("chapters"), model)
+                for fx in fixtures]
+        for f in futs:
+            story, score, defs, bad = f.result()
+            per_story[story] = score
+            deficiencies.extend(defs)
+            if bad:
+                failed.append(story)
     mean = round(sum(per_story.values()) / len(per_story), 1) if per_story else 0.0
     return {"mean": mean, "per_story": per_story, "deficiencies": deficiencies, "failed": failed}
 
@@ -515,7 +526,7 @@ def build_context(deficiencies, ledger):
             f"## Already tried (do NOT repeat verbatim)\n{tried or '(none)'}")
 
 
-def _load_fixtures(path: Path) -> list[str]:
+def _load_fixtures(path: Path) -> list[dict]:
     if not path.exists():
         return []
     items = []
@@ -523,9 +534,13 @@ def _load_fixtures(path: Path) -> list[str]:
         line = line.strip()
         if not line or line.startswith("#"):
             continue
+        chapters = None
+        if "|" in line:
+            line, chapters = [p.strip() for p in line.split("|", 1)]
+            chapters = chapters or None
         abs_path = line if os.path.isabs(line) else str(ROOT / line)
         if os.path.exists(abs_path):
-            items.append(abs_path)
+            items.append({"path": abs_path, "chapters": chapters, "label": os.path.basename(abs_path)})
     return items
 
 
