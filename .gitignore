@@ -27,3 +27,10 @@ __pycache__/
 
 # Large copyrighted reference PDFs (46MB) — kept out of history to stay lean
 docs/research/*.pdf
+
+# Auto-improvement loop runtime state (keep backlog.md tracked)
+loop/state/best.json
+loop/state/ledger.jsonl
+loop/state/*.log
+loop/state/needs_human.md
+loop/state/iter_*/

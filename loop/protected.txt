@@ -1,0 +1,21 @@
+# Files/globs the loop may NEVER auto-edit (enforced by loop.py GUARD step).
+# A diff touching any of these → the whole iteration is reverted.
+# Matched with Python fnmatch against repo-relative paths.
+#
+# NOTE: the JSON *schemas* live inside harness/llm.py (which the loop MUST edit for
+# prompts), so they can't be path-protected here — they're locked by a separate
+# schema-edit guard in loop.py (schema_edit_violation): any diff that touches a
+# _*_SCHEMA definition or schema-structural key in llm.py is reverted.
+
+loop/*
+loop/**
+harness/test_*.py
+harness/fake_llm.py
+harness/validation.py
+harness/AGENTS.md
+harness/VALIDATION.md
+harness/CREATIVE_WRITING.md
+harness/CREATIVE_WRITING_SKELETON.md
+harness/CREATIVE_WRITING_PROSE.md
+harness/CHOICE_DESIGN.md
+harness/DRAMATIC_STRUCTURE.md
