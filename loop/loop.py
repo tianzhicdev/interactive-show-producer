@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -277,7 +278,9 @@ def _run_full_fixture(story, chapters, model):
     """Run one full fixture and score it with the deterministic report card."""
     from loop.eval import evaluate_full
 
-    safe = re.sub(r"[^A-Za-z0-9]+", "_", os.path.basename(story))[:40]
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", os.path.basename(story))[:24].strip("_") or "story"
+    digest = hashlib.sha1(f"{story}|{chapters or ''}".encode("utf-8")).hexdigest()[:8]
+    safe = f"{slug}_{digest}"
     logpath = STATE / f"full_{safe}.log"
     env = {**os.environ, "HARNESS_PROSE_WORKERS": "1", "HARNESS_INGEST_WORKERS": "1"}
     cmd = [sys.executable, "-m", "harness", story]
