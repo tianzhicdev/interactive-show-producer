@@ -170,8 +170,7 @@ labels — keep the doc in sync with the logs):
   - 1b  Chunk the text (map/reduce prep)
   - 1c  Story bible (characters + world) — per-chunk in parallel, then merged.
         Each character gets a 250-350 Chinese-character background blurb
-        (出身/性格/处境/关系, no plot spoilers), matching the
-        /interactive-play-writer-characters-intro skill.
+        (出身/性格/处境/关系, no plot spoilers).
   - 1d  Highlights — per-chunk parallel, then reduced.
   - Outline — generate the outline plan -> outline.json (see Terminology).
 
@@ -239,7 +238,7 @@ One canonical meaning per term. Use these consistently in code, logs, and docs.
 | **Convergence node** | A node with >1 parent. Its skeleton/prose must be path-neutral — true regardless of which branch the reader arrived from. |
 | **Choice / question** | Every non-terminal node has exactly 2 choices and one `question`. Both are CREATED during skeleton (Phases 2-3) and only REPAIRED in Phase C. |
 
-### Time Budget vs LLM Budget
+### Time Budget
 
 Two independent budgets — do not conflate them.
 
@@ -248,7 +247,7 @@ Two independent budgets — do not conflate them.
   all nodes. Phase 3 expansion loops until `total_minutes(graph) >= total_budget_min`.
 - `words_per_min` (default 300): Chinese reading speed used to convert characters → minutes.
 - `planned_duration_min`: each node's *declared* minute budget, set during skeleton.
-  Range: non-DEAD_END 2.0-5.0 min, DEAD_END 1.0-1.5 min.
+  Range: non-DEAD_END 3.0-5.0 min, DEAD_END 1.0-1.5 min.
 - The **same metric (minutes) is measured differently in each stage** (`budget.estimate_minutes`):
   - **Skeleton stage** (thin content): minutes are *projected* —
     `max(planned_duration_min, skeleton_chars × 7.5 / words_per_min)`. The 7.5×
@@ -256,10 +255,6 @@ Two independent budgets — do not conflate them.
     (measured empirically; budgeting on `planned_duration_min` alone ran ~2× short).
   - **Prose stage** (filled content): minutes are *measured* from the actual prose
     char count (counting one average aftermath branch per choice).
-
-**2. LLM budget** — controls how many model calls the run may spend. "LLM budget
-exhausted" is the hard stop for the extraction, expansion, and self-heal loops. It
-is about call/token quota, not story length, and is independent of the time budget.
 
 ### Instruction Files
 
@@ -280,7 +275,7 @@ Skeleton-first separates concerns:
 - **Phases 2-3**: Focus on graph structure, facts, choices, and thin plot content
 - Skeleton nodes must include `planned_duration_min`; budget/ranking use this
   planned final duration until Phase 4 expands prose.
-- `planned_duration_min` range: non-DEAD_END nodes 2.0-5.0 minutes; DEAD_END
+- `planned_duration_min` range: non-DEAD_END nodes 3.0-5.0 minutes; DEAD_END
   nodes 1.0-1.5 minutes.
 - **Phase 3.5**: Validate skeleton story logic before expensive prose
 - **Phase 4**: Focus on writing quality from the accepted thin content

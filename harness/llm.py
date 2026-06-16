@@ -3909,11 +3909,34 @@ Rules for these violations:
 
     # W4: per-playthrough first-appearance (computed from graph memory)
     cast_section = ""
+    namecard_section = ""
     if first_appearing is not None or known_characters is not None:
         cast_section = (
             "## 角色出场状态（由全图计算，必须遵守）\n"
             f"本节点首次出场（必须加 namecard 并自然引入）: {json.dumps(first_appearing or [], ensure_ascii=False)}\n"
             f"观众已认识（禁止 namecard、禁止重复自我介绍）: {json.dumps(known_characters or [], ensure_ascii=False)}\n"
+        )
+    if first_appearing:
+        char_by_name = {
+            str(c.get("name", "")): c
+            for c in (compact.get("characters") or [])
+            if isinstance(c, dict) and c.get("name")
+        }
+        checklist_lines = []
+        for name in first_appearing:
+            ch = char_by_name.get(name, {})
+            role = str(ch.get("role", "")).strip()
+            desc = str(ch.get("description", "")).strip()
+            meta = " / ".join([x for x in (role, desc) if x])
+            if meta:
+                checklist_lines.append(f"- {name}: {meta}")
+            else:
+                checklist_lines.append(f"- {name}")
+        namecard_section = (
+            "## 必写 namecard 清单（硬性）\n"
+            "下面这些角色在本节点必须各自出现一次 namecard，且必须早于其第一句对白/首次关键动作。\n"
+            "不要把它们留给后续重试，也不要只靠 scene_header 里的角色名单代替。\n"
+            + "\n".join(checklist_lines) + "\n\n"
         )
 
     user = f"""## Compact bible
@@ -3924,6 +3947,7 @@ Rules for these violations:
 
 {source_section}
 {cast_section}
+{namecard_section}
 {incoming_info}
 {violation_section}
 Write detailed structured content for this single node.

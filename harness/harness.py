@@ -62,11 +62,19 @@ def build(
 ) -> Graph:
     """§4 — Main entry point. Builds an interactive story graph from a novel.
 
-    Three phases only:
-      Phase 1: Extraction (bible, chapters, highlights, registry)
-      Phase 2: Cornerstone (skeleton graph with prose, stabilize until clean)
-      Phase 3: Expansion loop (rank edges, expand, full-graph validate after each)
-    No separate prose phase — prose is written during expansion.
+    Skeleton-first pipeline, two stages (see harness/AGENTS.md):
+
+      Stage A — Skeleton (structure + thin plot, no prose):
+        Phase 1:   Extraction (bible, chapters, highlights, outline)
+        Phase 2:   Cornerstone (trunk skeleton, stabilize until clean)
+        Phase 3:   Expansion loop (rank edges, expand branches, validate)
+        Phase C:   Choice quality gate (recast defects into competing goods)
+        Phase 3.5: Skeleton semantic gate (DFS facts/path-neutrality)
+
+      Stage B — Prose (narrative + final validation):
+        Phase 4:   Prose generation (fill content[] from accepted skeleton)
+        Phase 4.5: Prose semantic gate (per-node, terminal markers)
+        Final:     Validation, D9 self-heal, export + upload
 
     Args:
         chapter_range: Optional (start, end) to limit processing to a chapter range.
