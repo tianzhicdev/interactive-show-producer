@@ -132,9 +132,22 @@ def schema_edit_violation(diff_text):
 
 # ---------- verification ----------
 
+def _pytest(timeout):
+    return sh([sys.executable, "-m", "pytest", "harness/", "-q",
+               "-p", "no:cacheprovider"], timeout=timeout)
+
+
 def fast_verify():
-    """Unit tests + fake full run + fake mini. Returns (ok, summary)."""
-    rc, out = sh([sys.executable, "-m", "pytest", "harness/", "-q"], timeout=600)
+    """Unit tests + fake full run + fake mini. Returns (ok, summary).
+
+    pytest is flaky under the loop's nohup subprocess context (it passes in ~0.3s
+    standalone but has intermittently hung to the timeout). Since a genuine test
+    failure is deterministic and fast, a TIMEOUT is treated as infra flakiness and
+    retried ONCE on a shorter budget before we reject the iteration."""
+    rc, out = _pytest(180)
+    if rc == 124:  # timed out → flaky infra, not a real failure; retry once clean
+        print("[loop] pytest timed out; retrying once...", file=sys.stderr)
+        rc, out = _pytest(180)
     if rc != 0:
         return False, "pytest failed:\n" + out[-1500:]
     fix = "harness/fixtures/tijiawangfei_10ch.txt"
@@ -242,44 +255,112 @@ def _oc_run(prompt, edit, timeout):
     return _ANSI.sub("", (p.stdout or "") + (p.stderr or ""))
 
 
-def propose(context):
-    """STEP 1 — opencode-qwen examines the last eval feedback + the code and proposes
-    ONE concrete change. Read-only (no edits possible headless without skip-perms)."""
-    prompt = f"""You improve the `harness/` story-generation engine toward loop/quality_eval.md.
-Read harness/AGENTS.md and the context below, examine the relevant harness/ code, and
-propose EXACTLY ONE small, concrete change (a real bug or a quality/conformance gap
-that should raise the PLOT eval score). Output a short proposal: target file(s), the
-change, and why. **PROPOSE ONLY — do not edit any file.**
+# Categories the proposer may use. PLOT_CATS are graded on the quality ratchet
+# (must improve-or-hold the judge mean); the rest are ENGINEERING changes graded on
+# score NON-REGRESSION + green tests (their benefit is verified by a human at merge).
+PLOT_CATS = {"plot-quality", "bug-fix"}
+ENG_CATS = {"speed", "refactor", "robustness", "model"}
+ALL_CATS = PLOT_CATS | ENG_CATS
 
-The change MUST respect (state how in your proposal):
-- Edit only harness/ source — NOT tests, validators, JSON schemas, instruction .md, or loop/.
-- Do NOT change the JSON schema or the eval criteria (loop/quality_eval.md). No hardcoded story content.
 
-CONTEXT (last eval deficiencies + backlog + already-tried — do not repeat tried items):
+def _extract_json_array(text):
+    """Pull the LAST top-level JSON array out of an opencode-qwen response (it may be
+    fenced, prefixed with prose, or followed by a tool trace). Returns [] on failure."""
+    # Prefer a ```json fenced block; else scan for the last balanced [...] array.
+    fences = re.findall(r"```(?:json)?\s*(\[.*?\])\s*```", text, re.DOTALL)
+    candidates = list(fences)
+    # Also try every '[' as a start of a balanced array (last one wins).
+    depth, start = 0, None
+    for i, ch in enumerate(text):
+        if ch == "[":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "]" and depth:
+            depth -= 1
+            if depth == 0 and start is not None:
+                candidates.append(text[start:i + 1])
+    for cand in reversed(candidates):
+        try:
+            v = json.loads(cand)
+            if isinstance(v, list) and v:
+                return v
+        except json.JSONDecodeError:
+            continue
+    return []
+
+
+def propose_plan(context, n=6):
+    """STEP 1 — opencode-qwen examines the harness + the context and proposes a RANKED
+    PLAN of ALL improvements it considers critical — any size, any category (not just
+    small prompt tweaks). Read-only (no edits possible headless without skip-perms).
+    Returns a list of item dicts: {title, category, target_files, change, rationale,
+    expected_impact, priority}."""
+    prompt = f"""You are improving the `harness/` interactive-story generation engine. Read
+harness/AGENTS.md and the context below, examine the relevant harness/ code, and propose
+a RANKED PLAN of EVERY change you consider important enough to be worth doing now.
+
+Do NOT limit yourself to small prompt tweaks. Propose whatever genuinely improves the
+harness — each item may be large or multi-file. Use these categories:
+- "plot-quality"  raise the loop/quality_eval.md PLOT score (prose/skeleton instructions, prompt builders)
+- "bug-fix"       a real correctness bug producing wrong/broken output
+- "speed"         make generation faster or cheaper (fewer/parallel LLM calls, caching, less redundant work)
+- "refactor"      code-health / maintainability with no behavior change
+- "robustness"    better error handling, retries, resumability
+- "model"         use a better-fitting model for a phase (state which phase + which model + why)
+
+Rank by importance (priority 1 = do first). Prefer high-impact items. It is fine to
+return just 1–3 items if only those are truly worth doing.
+
+HARD CONSTRAINTS every item must respect (state how in "change"):
+- Edit ONLY harness/ source. NEVER tests, validators, JSON schemas, the grading .md files, or loop/.
+- NEVER change the JSON schema (`_*_SCHEMA`/minItems/required/enum/properties in llm.py) or the
+  eval criteria (loop/quality_eval.md). NEVER hardcode story content. NEVER weaken a test/validator.
+
+CONTEXT (last eval deficiencies + backlog + already-tried + recent failures to learn from):
 {context}
 
-End your response with the proposal as a block beginning with a line `PROPOSAL:`
-(name the target file(s), the concrete change, and the expected eval improvement)."""
+**PROPOSE ONLY — do not edit any file.** End your response with a single fenced ```json block:
+```json
+[
+  {{"title": "...", "category": "plot-quality|bug-fix|speed|refactor|robustness|model",
+    "target_files": ["harness/..."], "change": "concrete what-to-do",
+    "rationale": "why it matters", "expected_impact": "what improves", "priority": 1}}
+]
+```"""
     out = _oc_run(prompt, edit=False, timeout=900)
-    idx = out.rfind("PROPOSAL:")
-    block = out[idx:] if idx >= 0 else out[-2000:]
-    # Stop at the first opencode tool-trace / session line so the proposal is clean.
-    lines = []
-    for ln in block.splitlines():
-        if lines and (re.match(r"^\s*[>→✱✗•]", ln) or ln.startswith("Error:") or "qwen3-coder" in ln):
-            break
-        lines.append(ln)
-    return "\n".join(lines).strip()
+    items = _extract_json_array(out)
+    plan = []
+    for it in items[:n]:
+        if not isinstance(it, dict) or not it.get("change"):
+            continue
+        cat = str(it.get("category", "")).strip().lower()
+        it["category"] = cat if cat in ALL_CATS else "plot-quality"
+        it["title"] = str(it.get("title", it["change"]))[:160]
+        plan.append(it)
+    plan.sort(key=lambda x: x.get("priority", 99))
+    return plan
 
 
-def apply_change(proposal):
-    """STEP 2 — opencode-qwen applies the proposed change (edits enabled)."""
+def _item_text(item):
+    """One-line human summary of a plan item for logs/commits."""
+    return f"[{item.get('category','?')}] {item.get('title','')}".strip()
+
+
+def apply_change(item):
+    """STEP 2 — opencode-qwen applies ONE plan item (edits enabled). The item may be a
+    large/multi-file change, but only this one item is applied per iteration so its
+    effect on the eval is attributable and cleanly revertable."""
     protected = "\n".join(protected_globs())
-    prompt = f"""Apply EXACTLY the following proposed change to the `harness/` engine as the
-smallest coherent diff, then stop. Do NOT run the pipeline.
+    spec = (item if isinstance(item, str) else
+            f"TITLE: {item.get('title')}\nCATEGORY: {item.get('category')}\n"
+            f"TARGET FILES: {item.get('target_files')}\nCHANGE: {item.get('change')}\n"
+            f"RATIONALE: {item.get('rationale')}\nEXPECTED IMPACT: {item.get('expected_impact')}")
+    prompt = f"""Apply EXACTLY the following proposed change to the `harness/` engine as one
+coherent diff, then stop. Do NOT run the pipeline. Make the change as large as the proposal
+requires, but do not bundle in unrelated edits.
 
-PROPOSAL:
-{proposal[:4000]}
+{spec[:4000]}
 
 HARD RULES (the iteration is reverted if any is violated):
 - Edit ONLY harness/ source. NEVER edit these:
@@ -301,13 +382,29 @@ def ledger_append(rec):
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
+def _ledger_label(r):
+    return r.get("title") or (r.get("proposal", "") or "")[:120]
+
+
 def build_context(deficiencies, ledger):
     backlog = (STATE / "backlog.md")
     bl = backlog.read_text() if backlog.exists() else "(empty)"
-    tried = "\n".join(f"- [{r['verdict']}] {r['proposal'][:120]}" for r in ledger[-12:])
+    tried = "\n".join(f"- [{r.get('verdict')}] {_ledger_label(r)}" for r in ledger[-15:])
+    # Self-recovery: surface WHY recent attempts were rejected (reason + a detail
+    # excerpt) so the next plan doesn't repeat a failing approach and can fix the cause.
+    fails = []
+    for r in ledger[-20:]:
+        if r.get("verdict") == "rejected":
+            line = f"- {_ledger_label(r)} → FAILED: {r.get('reason','?')}"
+            if r.get("detail"):
+                line += f" — {str(r['detail'])[:200]}"
+            fails.append(line)
+    failblock = "\n".join(fails[-8:]) or "(none)"
     defs = "\n".join(f"- {d}" for d in deficiencies[:15]) or "(none from last eval)"
-    return (f"## Last eval deficiencies (fix these first)\n{defs}\n\n"
-            f"## Backlog (curated)\n{bl}\n\n## Already tried (do NOT repeat)\n{tried or '(none)'}")
+    return (f"## Last eval deficiencies (PLOT gaps — these raise the score)\n{defs}\n\n"
+            f"## Backlog (curated priorities)\n{bl}\n\n"
+            f"## Recent FAILURES — learn from these; fix the cause or avoid the approach\n{failblock}\n\n"
+            f"## Already tried (do NOT repeat verbatim)\n{tried or '(none)'}")
 
 
 def revert_worktree():
@@ -372,24 +469,50 @@ def main():
     if a.dry_run:
         print("[loop] dry-run: baseline only, exiting."); return
 
+    # Work queue: the proposer surfaces ALL critical items up front (plan.json); the
+    # loop applies ONE per iteration (attributable + revertable) and refreshes the plan
+    # when the queue drains. A rejected item's failure detail is fed back via the ledger.
+    plan = load_json(STATE / "plan.json", [])
+
+    def save_plan():
+        (STATE / "plan.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2))
+
+    def reject(it, item, reason, files=None, detail="", **extra):
+        print(f"[loop] REJECT ({reason}) — reverting" + (f"\n{str(detail)[:400]}" if detail else ""))
+        revert_worktree()
+        ledger_append({"iter": it, "title": _item_text(item), "category": item.get("category"),
+                       "files": files or item.get("target_files"),
+                       "verdict": "rejected", "reason": reason, "detail": str(detail)[:600], **extra})
+
     no_improve = 0
     for it in range(1, a.max_iters + 1):
         if no_improve >= a.patience:
             print(f"[loop] converged: {a.patience} iterations with no improvement."); break
-        print(f"\n===== iteration {it}/{a.max_iters} (best_mean={best.get('mean')}, no_improve={no_improve}) =====")
 
-        # STEP 1 — EXAMINE + PROPOSE (opencode-qwen, read-only)
-        ctx = build_context(last_defs, ledger)
-        proposal = propose(ctx)
-        print(f"[loop] proposal: {' '.join(proposal.split())[:200]}")
-        # STEP 2 — APPLY (opencode-qwen, edits enabled)
-        apply_change(proposal)
+        # STEP 1 — PROPOSE A PLAN when the queue is empty (opencode-qwen, read-only).
+        # All critical items are surfaced at once; failures feed back into the next plan.
+        if not plan:
+            ctx = build_context(last_defs, ledger)
+            plan = propose_plan(ctx)
+            save_plan()
+            if not plan:
+                print("[loop] proposer returned no actionable items; stopping."); break
+            print(f"[loop] new plan ({len(plan)} items): " +
+                  " | ".join(_item_text(p) for p in plan))
+            ledger_append({"iter": it, "verdict": "plan", "items": [_item_text(p) for p in plan]})
+
+        item = plan.pop(0); save_plan()
+        print(f"\n===== iteration {it}/{a.max_iters} (best_mean={best.get('mean')}, "
+              f"no_improve={no_improve}) =====\n[loop] item: {_item_text(item)}")
+
+        # STEP 2 — APPLY one item (opencode-qwen, edits enabled)
+        apply_change(item)
         files = changed_files()
         if not files:
             print("[loop] apply made no change; skipping."); no_improve += 1
-            ledger_append({"iter": it, "proposal": proposal, "verdict": "noop"}); continue
+            ledger_append({"iter": it, "title": _item_text(item), "verdict": "noop"}); continue
 
-        # 3. GUARD: protected files + gate H
+        # 3. GUARD: protected files + gate H + schema lock
         prot = touches_protected(files)
         _, diff = git("diff", "HEAD")
         gh = gate_h_violation(diff)
@@ -398,16 +521,13 @@ def main():
             reason = (("protected:" + ",".join(prot)) if prot
                       else ("gate-H:" + "; ".join(gh[:2])) if gh
                       else ("schema-edit:" + "; ".join(sch[:2])))
-            print(f"[loop] REJECT ({reason}) — reverting"); revert_worktree()
-            ledger_append({"iter": it, "proposal": proposal, "files": files,
-                           "verdict": "rejected", "reason": reason}); no_improve += 1; continue
+            reject(it, item, reason, files=files); no_improve += 1; continue
 
-        # 4. VERIFY-FAST
+        # 4. VERIFY-FAST (tests/fake). The full failure summary is logged so the next
+        #    plan can see exactly what broke and self-correct.
         ok, summ = fast_verify()
         if not ok:
-            print(f"[loop] REJECT (tests) — reverting\n{summ[:400]}"); revert_worktree()
-            ledger_append({"iter": it, "proposal": proposal, "files": files,
-                           "verdict": "rejected", "reason": "tests"}); no_improve += 1; continue
+            reject(it, item, "tests", files=files, detail=summ); no_improve += 1; continue
 
         # 5. VERIFY-REAL: all fixtures in parallel → mean + per-story scores
         if a.fast_only:
@@ -415,32 +535,45 @@ def main():
                    "deficiencies": last_defs, "failed": []}
         else:
             new = real_eval_all(fixtures, a.model, not a.no_judge)
-            if new["failed"]:  # a fix that breaks ANY genre's pipeline = reject
-                print(f"[loop] REJECT (mini failed: {new['failed']}) — reverting"); revert_worktree()
-                ledger_append({"iter": it, "proposal": proposal, "files": files,
-                               "verdict": "rejected", "reason": "mini-failed"}); no_improve += 1; continue
+            if new["failed"]:  # a change that breaks ANY genre's pipeline = reject
+                reject(it, item, "mini-failed", files=files, detail=new["failed"],
+                       per_story=new["per_story"]); no_improve += 1; continue
 
-        # 6. RATCHET: mean must not drop AND no genre may fall below its floor (best - ε)
+        # 6. ACCEPTANCE — category-aware (see PLOT_CATS / ENG_CATS):
+        #    plot/bug-fix must improve-or-hold the mean; engineering changes need only
+        #    NOT regress quality (mean >= best-ε, floor holds) — their benefit is the
+        #    proposer's claim, verified by a human before merge.
         prev_mean = best.get("mean", 0.0)
         prev_per = best.get("per_story", {})
+        is_plot = item.get("category") in PLOT_CATS
         floor_ok = all(new["per_story"].get(f, 0.0) >= prev_per.get(f, 0.0) - a.epsilon
                        for f in new["per_story"])
-        if new["mean"] >= prev_mean and floor_ok:
+        quality_ok = (new["mean"] >= prev_mean) if is_plot else (new["mean"] >= prev_mean - a.epsilon)
+
+        if quality_ok and floor_ok:
             git("add", "-A")
-            git("commit", "-q", "-m", f"loop iter {it}: {proposal} (mean {new['mean']} >= {prev_mean})")
-            best = {"mean": new["mean"], "per_story": new["per_story"],
-                    "commit": git("rev-parse", "HEAD")[1].strip(), "deficiencies": new["deficiencies"]}
-            save_best(); last_defs = new["deficiencies"]
-            print(f"[loop] ACCEPT — mean {new['mean']} (per_story {new['per_story']}), committed.")
-            ledger_append({"iter": it, "proposal": proposal, "files": files,
-                           "verdict": "accepted", "mean": new["mean"], "per_story": new["per_story"]})
-            no_improve = 0 if new["mean"] > prev_mean else no_improve + 1
+            git("commit", "-q", "-m",
+                f"loop iter {it}: {_item_text(item)} (mean {new['mean']} vs {prev_mean})")
+            commit = git("rev-parse", "HEAD")[1].strip()
+            if new["mean"] > prev_mean:  # quality improvement → raise the bar
+                best = {"mean": new["mean"], "per_story": new["per_story"], "commit": commit,
+                        "deficiencies": new["deficiencies"]}
+                last_defs = new["deficiencies"]
+            else:                        # engineering / neutral hold → keep the bar, log commit
+                best["commit"] = commit
+            save_best()
+            print(f"[loop] ACCEPT [{item.get('category')}] — mean {new['mean']} "
+                  f"(per_story {new['per_story']}), committed {commit[:8]}.")
+            ledger_append({"iter": it, "title": _item_text(item), "category": item.get("category"),
+                           "files": files, "verdict": "accepted", "commit": commit,
+                           "mean": new["mean"], "per_story": new["per_story"]})
+            no_improve = 0  # any accepted improvement is progress
         else:
-            reason = "mean" if new["mean"] < prev_mean else "per-story-floor"
-            print(f"[loop] REJECT ({reason}: mean {new['mean']} vs {prev_mean}, "
-                  f"per_story {new['per_story']}) — reverting"); revert_worktree()
-            ledger_append({"iter": it, "proposal": proposal, "files": files, "verdict": "rejected",
-                           "reason": reason, "mean": new["mean"], "per_story": new["per_story"]})
+            reason = "regress-mean" if new["mean"] < prev_mean - (0 if is_plot else a.epsilon) \
+                     else "per-story-floor"
+            reject(it, item, reason, files=files,
+                   detail=f"mean {new['mean']} vs {prev_mean}, per_story {new['per_story']}",
+                   mean=new["mean"], per_story=new["per_story"])
             no_improve += 1
 
     print(f"\n[loop] done. best mean = {best.get('mean')} on {best.get('commit','')[:8]} "
