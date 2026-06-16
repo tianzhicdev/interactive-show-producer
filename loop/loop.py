@@ -32,8 +32,13 @@ STATE = LOOP / "state"
 
 
 def sh(cmd, cwd=ROOT, timeout=None, check=False):
-    p = subprocess.run(cmd, cwd=cwd, shell=isinstance(cmd, str),
-                       capture_output=True, text=True, timeout=timeout)
+    try:
+        p = subprocess.run(cmd, cwd=cwd, shell=isinstance(cmd, str),
+                           capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # Don't let a hung/slow subprocess (e.g. pytest during a network outage)
+        # crash the whole loop — surface it as a non-zero result the caller handles.
+        return 124, f"TIMEOUT after {timeout}s: {cmd}"
     if check and p.returncode != 0:
         raise RuntimeError(f"cmd failed ({p.returncode}): {cmd}\n{p.stderr[-2000:]}")
     return p.returncode, (p.stdout or "") + (p.stderr or "")
@@ -227,7 +232,13 @@ def _oc_run(prompt, edit, timeout):
     cmd = [OPENCODE, "run", prompt, "--dir", str(ROOT)]
     if edit:
         cmd.append("--dangerously-skip-permissions")
-    p = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=timeout)
+    try:
+        p = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        # opencode hang / network outage → return empty; the loop treats a no-change
+        # apply as a skipped iteration rather than crashing.
+        print(f"[loop] opencode-qwen failed ({e}); treating as no-op", file=sys.stderr)
+        return ""
     return _ANSI.sub("", (p.stdout or "") + (p.stderr or ""))
 
 
