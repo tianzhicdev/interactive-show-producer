@@ -264,12 +264,12 @@ ALL_CATS = PLOT_CATS | ENG_CATS
 
 
 def _extract_json_array(text):
-    """Pull the LAST top-level JSON array out of an opencode-qwen response (it may be
-    fenced, prefixed with prose, or followed by a tool trace). Returns [] on failure."""
-    # Prefer a ```json fenced block; else scan for the last balanced [...] array.
+    """Pull the PLAN array out of an opencode-qwen response (which may be fenced, wrapped
+    in prose, and contain unrelated bracket literals like `["harness/llm.py"]` in quoted
+    code). Returns the parseable array with the MOST dict objects — that's the plan, not a
+    stray string-list. Fenced ```json blocks are tried first so they win ties. [] if none."""
     fences = re.findall(r"```(?:json)?\s*(\[.*?\])\s*```", text, re.DOTALL)
     candidates = list(fences)
-    # Also try every '[' as a start of a balanced array (last one wins).
     depth, start = 0, None
     for i, ch in enumerate(text):
         if ch == "[":
@@ -280,22 +280,27 @@ def _extract_json_array(text):
             depth -= 1
             if depth == 0 and start is not None:
                 candidates.append(text[start:i + 1])
-    for cand in reversed(candidates):
+    best, best_dicts = [], 0
+    for cand in candidates:
         try:
             v = json.loads(cand)
-            if isinstance(v, list) and v:
-                return v
         except json.JSONDecodeError:
             continue
-    return []
+        if not isinstance(v, list):
+            continue
+        ndict = sum(1 for x in v if isinstance(x, dict))
+        if ndict > best_dicts:  # the array carrying the most objects is the plan
+            best, best_dicts = v, ndict
+    return best
 
 
-def propose_plan(context, n=6):
+def propose_plan(context, n=6, attempts=3):
     """STEP 1 — opencode-qwen examines the harness + the context and proposes a RANKED
     PLAN of ALL improvements it considers critical — any size, any category (not just
     small prompt tweaks). Read-only (no edits possible headless without skip-perms).
     Returns a list of item dicts: {title, category, target_files, change, rationale,
-    expected_impact, priority}."""
+    expected_impact, priority}. Retries on a transient empty/unparseable response so a
+    single flaky opencode call doesn't end the whole loop."""
     prompt = f"""You are improving the `harness/` interactive-story generation engine. Read
 harness/AGENTS.md and the context below, examine the relevant harness/ code, and propose
 a RANKED PLAN of EVERY change you consider important enough to be worth doing now.
@@ -328,18 +333,23 @@ CONTEXT (last eval deficiencies + backlog + already-tried + recent failures to l
     "rationale": "why it matters", "expected_impact": "what improves", "priority": 1}}
 ]
 ```"""
-    out = _oc_run(prompt, edit=False, timeout=900)
-    items = _extract_json_array(out)
-    plan = []
-    for it in items[:n]:
-        if not isinstance(it, dict) or not it.get("change"):
-            continue
-        cat = str(it.get("category", "")).strip().lower()
-        it["category"] = cat if cat in ALL_CATS else "plot-quality"
-        it["title"] = str(it.get("title", it["change"]))[:160]
-        plan.append(it)
-    plan.sort(key=lambda x: x.get("priority", 99))
-    return plan
+    for attempt in range(1, attempts + 1):
+        out = _oc_run(prompt, edit=False, timeout=900)
+        items = _extract_json_array(out)
+        plan = []
+        for it in items[:n]:
+            if not isinstance(it, dict) or not it.get("change"):
+                continue
+            cat = str(it.get("category", "")).strip().lower()
+            it["category"] = cat if cat in ALL_CATS else "plot-quality"
+            it["title"] = str(it.get("title", it["change"]))[:160]
+            plan.append(it)
+        if plan:
+            plan.sort(key=lambda x: x.get("priority", 99))
+            return plan
+        print(f"[loop] propose attempt {attempt}/{attempts}: no valid plan parsed "
+              f"(raw len={len(out)}); retrying...", file=sys.stderr)
+    return []
 
 
 def _item_text(item):
