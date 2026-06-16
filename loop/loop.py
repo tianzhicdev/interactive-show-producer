@@ -232,7 +232,14 @@ End your response with the proposal as a block beginning with a line `PROPOSAL:`
 (name the target file(s), the concrete change, and the expected eval improvement)."""
     out = _oc_run(prompt, edit=False, timeout=900)
     idx = out.rfind("PROPOSAL:")
-    return out[idx:].strip() if idx >= 0 else out[-2000:].strip()
+    block = out[idx:] if idx >= 0 else out[-2000:]
+    # Stop at the first opencode tool-trace / session line so the proposal is clean.
+    lines = []
+    for ln in block.splitlines():
+        if lines and (re.match(r"^\s*[>→✱✗•]", ln) or ln.startswith("Error:") or "qwen3-coder" in ln):
+            break
+        lines.append(ln)
+    return "\n".join(lines).strip()
 
 
 def apply_change(proposal):
