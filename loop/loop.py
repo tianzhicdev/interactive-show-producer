@@ -273,6 +273,56 @@ def real_eval_all(fixtures, model, use_judge):
     return {"mean": mean, "per_story": per_story, "deficiencies": deficiencies, "failed": failed}
 
 
+def real_eval_full_all(fixtures, model):
+    """Run the full regression set and score each run with the deterministic
+    full-run report card."""
+    from loop.eval import evaluate_full
+
+    per_story, deficiencies, failed = {}, [], []
+    for story in fixtures:
+        safe = re.sub(r"[^A-Za-z0-9]+", "_", os.path.basename(story))[:40]
+        logpath = STATE / f"full_{safe}.log"
+        env = {**os.environ, "HARNESS_PROSE_WORKERS": "1", "HARNESS_INGEST_WORKERS": "1"}
+        cmd = [sys.executable, "-m", "harness", story,
+               "--playthrough", "55", "--total", "100", "--min-endings", "3",
+               "--model", model,
+               "--no-upload"]
+        lf = open(logpath, "w")
+        p = subprocess.Popen(cmd, cwd=ROOT, stdout=lf, stderr=subprocess.STDOUT,
+                             text=True, env=env, start_new_session=True)
+        _ACTIVE_MINIS.append(p)
+        try:
+            p.wait(timeout=7200)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            try:
+                p.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                pass
+        lf.close()
+        _ACTIVE_MINIS[:] = [x for x in _ACTIVE_MINIS if x.pid != p.pid]
+        out = Path(logpath).read_text()
+        if p.returncode != 0:
+            failed.append(story)
+            per_story[story] = 0.0
+            deficiencies.append(f"[{os.path.basename(story)}] full run FAILED")
+            continue
+        m = re.findall(r"harness_output/run_[0-9_]+", out)
+        run_dir = m[-1] if m else None
+        gf = os.path.join(ROOT, run_dir, "graph_final.json") if run_dir else ""
+        if not run_dir or not os.path.exists(gf):
+            failed.append(story)
+            per_story[story] = 0.0
+            deficiencies.append(f"[{os.path.basename(story)}] no graph_final.json")
+            continue
+        res = evaluate_full(os.path.join(ROOT, run_dir))
+        base = os.path.basename(story)
+        per_story[story] = res["score"] if res["score"] is not None else 0.0
+        deficiencies += [f"[{base}] {d}" for d in res["deficiencies"]]
+    mean = round(sum(per_story.values()) / len(per_story), 1) if per_story else 0.0
+    return {"mean": mean, "per_story": per_story, "deficiencies": deficiencies, "failed": failed}
+
+
 # ---------- propose (step 1) + apply (step 2): both via opencode-qwen ----------
 
 OPENCODE = "opencode-qwen"  # opencode run, Qwen3-Coder via OpenRouter
@@ -465,6 +515,20 @@ def build_context(deficiencies, ledger):
             f"## Already tried (do NOT repeat verbatim)\n{tried or '(none)'}")
 
 
+def _load_fixtures(path: Path) -> list[str]:
+    if not path.exists():
+        return []
+    items = []
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        abs_path = line if os.path.isabs(line) else str(ROOT / line)
+        if os.path.exists(abs_path):
+            items.append(abs_path)
+    return items
+
+
 def revert_worktree():
     git("reset", "--hard", "HEAD")
     git("clean", "-fd", "harness")
@@ -642,6 +706,7 @@ def main():
     fixtures = [f for f in fixtures if os.path.exists(f if os.path.isabs(f) else ROOT / f)]
     if not fixtures:
         print("ERROR: no usable fixtures in loop/fixtures.txt"); sys.exit(1)
+    full_fixtures = _load_fixtures(LOOP / "full_fixtures.txt")
 
     def save_best():
         (STATE / "best.json").write_text(json.dumps(best, ensure_ascii=False, indent=2))
@@ -652,9 +717,18 @@ def main():
         r = real_eval_all(fixtures, a.model, not a.no_judge)
         best = {"mean": r["mean"], "per_story": r["per_story"],
                 "commit": git("rev-parse", "HEAD")[1].strip(), "deficiencies": r["deficiencies"]}
+        if full_fixtures:
+            print(f"[loop] establishing full-run baseline ({len(full_fixtures)} fixture(s))...")
+            fr = real_eval_full_all(full_fixtures, a.model)
+            best["full_mean"] = fr["mean"]
+            best["full_per_story"] = fr["per_story"]
+            best["full_deficiencies"] = fr["deficiencies"]
         save_best()
         print(f"[loop] baseline mean={best['mean']} per_story={best['per_story']}")
+        if full_fixtures:
+            print(f"[loop] baseline full_mean={best.get('full_mean')} full_per_story={best.get('full_per_story')}")
     last_defs = best.get("deficiencies", [])
+    last_full_defs = best.get("full_deficiencies", [])
 
     if a.dry_run:
         print("[loop] dry-run: baseline only, exiting."); return
@@ -673,7 +747,7 @@ def main():
             print(f"[loop] converged: {a.patience} rounds with no quality improvement."); break
         base = git("rev-parse", "HEAD")[1].strip()
 
-        ctx = build_context(last_defs, ledger)
+        ctx = build_context(last_defs + last_full_defs, ledger)
         plan = propose_plan(ctx)
         if not plan:
             print("[loop] proposer returned no actionable items; stopping."); break
@@ -693,6 +767,7 @@ def main():
         # Group file-disjoint items so any subset can be cherry-picked conflict-free.
         groups = group_by_files(metas)
         prev_mean = best.get("mean", 0.0); prev_per = best.get("per_story", {})
+        prev_full_mean = best.get("full_mean", 0.0); prev_full_per = best.get("full_per_story", {})
         print(f"[loop] {len(metas)} item(s) in {len(groups)} disjoint group(s); "
               f"applying the bundle and bisecting if it regresses...")
 
@@ -710,14 +785,91 @@ def main():
                 return "tests:" + summ[-200:], None
             if a.fast_only:
                 return None, {"mean": prev_mean, "per_story": prev_per,
-                              "deficiencies": last_defs, "failed": []}
+                              "deficiencies": last_defs, "failed": [],
+                              "full_mean": prev_full_mean, "full_per_story": prev_full_per,
+                              "full_deficiencies": last_full_defs}
             new = real_eval_all(fixtures, a.model, not a.no_judge)
             if new["failed"]:
                 return "mini-failed:" + str(new["failed"]), None
+            if full_fixtures:
+                fr = real_eval_full_all(full_fixtures, a.model)
+                new["full_mean"] = fr["mean"]
+                new["full_per_story"] = fr["per_story"]
+                new["full_deficiencies"] = fr["deficiencies"]
+            else:
+                new["full_mean"] = prev_full_mean
+                new["full_per_story"] = prev_full_per
+                new["full_deficiencies"] = last_full_defs
             return None, new
 
-        kept_groups, new = bisect_groups(base, groups, evaluate_subset,
-                                         prev_mean, prev_per, a.epsilon)
+        def accept_subset(metas_subset, new):
+            mini_ok = _accept(metas_subset, new, prev_mean, prev_per, a.epsilon)
+            if not full_fixtures:
+                return mini_ok
+            full_prev = prev_full_mean
+            full_per = prev_full_per
+            full_ok = all(new["full_per_story"].get(f, 0.0) >= full_per.get(f, 0.0) - a.epsilon
+                          for f in new["full_per_story"])
+            is_plot = any(m["item"].get("category") in PLOT_CATS for m in metas_subset)
+            full_quality_ok = (new["full_mean"] >= full_prev) if is_plot else (new["full_mean"] >= full_prev - a.epsilon)
+            return mini_ok and full_ok and full_quality_ok
+
+        def bisect_groups_full(base, groups, evaluate_subset, prev_mean, prev_per, eps, max_tests=8):
+            # Wrapper around the existing bisection that also respects the full-run gate.
+            def _accept_full(gs, res):
+                err, new = res
+                return err is None and accept_subset(flat(gs), new)
+
+            # Reuse existing recursion by temporarily swapping the acceptance predicate
+            budget = [max_tests]
+            memo = {}
+
+            def flat(gs):
+                return [m for g in gs for m in g]
+
+            def key(gs):
+                return frozenset(m["idx"] for m in flat(gs))
+
+            def test(gs):
+                k = key(gs)
+                if k in memo:
+                    return memo[k]
+                if budget[0] <= 0:
+                    return "budget", None
+                budget[0] -= 1
+                memo[k] = evaluate_subset(flat(gs))
+                return memo[k]
+
+            def score(res):
+                return res[1]["mean"] if res and res[1] else -1e9
+
+            def rec(gs):
+                if not gs:
+                    return [], None
+                res = test(gs)
+                if _accept_full(gs, res):
+                    return gs, res[1]
+                if len(gs) == 1:
+                    return [], None
+                mid = len(gs) // 2
+                L, lnew = rec(gs[:mid])
+                R, rnew = rec(gs[mid:])
+                union = L + R
+                if not union:
+                    return [], None
+                if L and R and len(union) < len(gs):
+                    ures = test(union)
+                    if _accept_full(union, ures):
+                        return union, ures[1]
+                lr, rr = (None, lnew), (None, rnew)
+                if L and R:
+                    return (L, lnew) if score(lr) >= score(rr) else (R, rnew)
+                return (L, lnew) if L else (R, rnew)
+
+            return rec(groups)
+
+        kept_groups, new = bisect_groups_full(base, groups, evaluate_subset,
+                                              prev_mean, prev_per, a.epsilon)
         kept = sorted([m for g in kept_groups for m in g], key=lambda m: m["idx"])
         kept_idx = {m["idx"] for m in kept}
         dropped = [m for m in metas if m["idx"] not in kept_idx]
@@ -733,20 +885,31 @@ def main():
             git("cherry-pick", m["commit"])
         commit = git("rev-parse", "HEAD")[1].strip()
         print(f"[loop] ACCEPT round {rnd}: kept {len(kept)}/{len(metas)} item(s) "
-              f"(mean {new['mean']} vs {prev_mean}, per_story {new['per_story']}); "
+              f"(mean {new['mean']} vs {prev_mean}, per_story {new['per_story']}" +
+              (f", full_mean {new.get('full_mean')} vs {prev_full_mean}, full_per_story {new.get('full_per_story')}" if full_fixtures else "") +
+              "); "
               f"dropped {len(dropped)}; committed {commit[:8]}.")
         if new["mean"] > prev_mean:        # quality improvement → raise the bar, reset patience
             best = {"mean": new["mean"], "per_story": new["per_story"], "commit": commit,
-                    "deficiencies": new["deficiencies"]}
+                    "deficiencies": new["deficiencies"],
+                    "full_mean": new.get("full_mean", prev_full_mean),
+                    "full_per_story": new.get("full_per_story", prev_full_per),
+                    "full_deficiencies": new.get("full_deficiencies", last_full_defs)}
             last_defs = new["deficiencies"]; no_improve = 0
         else:                              # engineering / neutral hold → keep bar, count toward patience
             best["commit"] = commit; no_improve += 1
+            if full_fixtures:
+                best["full_mean"] = new.get("full_mean", prev_full_mean)
+                best["full_per_story"] = new.get("full_per_story", prev_full_per)
+                best["full_deficiencies"] = new.get("full_deficiencies", last_full_defs)
+                last_full_defs = new.get("full_deficiencies", last_full_defs)
         save_best()
         for m in kept:
             ledger_append({"round": rnd, "title": _item_text(m["item"]),
                            "category": m["item"].get("category"), "files": m["files"],
                            "verdict": "accepted", "commit": commit,
-                           "mean": new["mean"], "per_story": new["per_story"]})
+                           "mean": new["mean"], "per_story": new["per_story"],
+                           "full_mean": new.get("full_mean"), "full_per_story": new.get("full_per_story")})
         for m in dropped:
             ledger_append({"round": rnd, "title": _item_text(m["item"]),
                            "category": m["item"].get("category"), "files": m["files"],

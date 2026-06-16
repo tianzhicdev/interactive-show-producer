@@ -1,0 +1,3 @@
+# Full-run regression set for long-horizon harness health.
+# Keep this small: these runs are expensive compared with --mini.
+harness/fixtures/tijiawangfei_10ch.txt
