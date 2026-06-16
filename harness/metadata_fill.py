@@ -34,6 +34,8 @@ _META_SCHEMA = {
                    "description": "实际发生的事——必须偏离预期（Gap 的另一半）"},
         "opening_charge": {"type": "string", "enum": ["+", "-"]},
         "closing_charge": {"type": "string", "enum": ["+", "-"]},
+        "expectation": {"type": "string", "description": "主角对本场结果的预期（McKee Gap 的一半）"},
+        "result": {"type": "string", "description": "实际发生的事——必须偏离预期（Gap 的另一半）"},
         "turning_type": {"type": "string", "enum": ["action", "revelation"]},
         "tension": {"type": "integer", "description": "1-5"},
         "arc_slot": {"type": "string", "enum": _ARC_SLOTS + [""]},
@@ -56,8 +58,8 @@ _META_SCHEMA = {
             },
         },
     },
-    "required": ["title", "value", "opening_charge", "closing_charge",
-                 "turning_type", "tension", "beat_roles", "choices"],
+    "required": ["title", "value", "opening_charge", "closing_charge", "expectation",
+                 "result", "turning_type", "tension", "beat_roles", "choices"],
 }
 
 

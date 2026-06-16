@@ -726,6 +726,14 @@ def main():
     def save_best():
         (STATE / "best.json").write_text(json.dumps(best, ensure_ascii=False, indent=2))
 
+    if full_fixtures:
+        current_full = {fx["path"] for fx in full_fixtures}
+        saved_full = set((best.get("full_per_story") or {}).keys())
+        if saved_full and saved_full != current_full:
+            for key in ("full_mean", "full_per_story", "full_deficiencies"):
+                best.pop(key, None)
+            save_best()
+
     # Baseline: run ALL fixtures in parallel; the combined signal is their mean.
     if "mean" not in best and not a.fast_only:
         print(f"[loop] establishing baseline ({len(fixtures)} fixtures in parallel)...")
