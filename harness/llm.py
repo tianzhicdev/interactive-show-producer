@@ -15,6 +15,7 @@ from .models import (
     Choice, Effect, FactDecl, Feedback, Graph, HarnessError, Highlight, Goal,
     Node, NodeId, Params, Registry, Requirement, State, VARIES, Violation,
 )
+from .tiers import ModelRoute, get_coding_llm_model, get_eval_model, get_writing_llm_model
 
 log = logging.getLogger(__name__)
 
@@ -60,8 +61,9 @@ _VALIDATION_MD = (_HARNESS_DIR / "VALIDATION.md").read_text()
 
 # ---------- LLM backend selection ----------
 
-_LLM_BACKEND = "fireworks"  # "fireworks" | "claude_code"
+_LLM_BACKEND = "fireworks"  # "fireworks" | "claude_code" | "openrouter"
 _LLM_MODEL: str | None = None
+_LLM_TIER: str | None = None
 
 _MODEL_ALIASES = {
     "fireworks": ("fireworks", "accounts/fireworks/models/glm-5p1"),
@@ -75,6 +77,8 @@ _MODEL_ALIASES = {
     "claude": ("claude_code", None),
     "claude_code": ("claude_code", None),
 }
+
+_TIER_ALIASES = {"cheap", "premium"}
 
 _VALUE_SCHEMA = {"type": ["boolean", "integer", "number", "string"]}
 _FACT_DECL_SCHEMA = {
@@ -524,18 +528,34 @@ _COMPETING_GOODS_SCHEMA = {
 
 def set_backend(backend: str, model: str | None = None) -> None:
     """Switch LLM backend: 'fireworks' (API) or 'claude_code' (local subscription)."""
-    global _LLM_BACKEND, _LLM_MODEL
-    if backend not in ("fireworks", "anthropic", "claude_code", "fake"):
+    global _LLM_BACKEND, _LLM_MODEL, _LLM_TIER
+    if backend not in ("fireworks", "anthropic", "claude_code", "openrouter", "fake"):
         raise ValueError(f"Unknown backend: {backend!r}. "
-                         f"Use 'fireworks', 'anthropic', 'claude_code' or 'fake'.")
+                         f"Use 'fireworks', 'anthropic', 'claude_code', 'openrouter' or 'fake'.")
     if backend == "claude_code":
         _preflight_claude_code()
     _LLM_BACKEND = backend
     _LLM_MODEL = model
+    if backend == "openrouter" and not _LLM_TIER:
+        _LLM_TIER = "cheap"
     if model:
         log.info("LLM backend set to: %s (%s)", backend, model)
     else:
         log.info(f"LLM backend set to: {backend}")
+
+
+def set_tier(tier: str) -> None:
+    """Switch the harness-wide model tier."""
+    global _LLM_TIER
+    normalized = (tier or "").strip().lower()
+    if normalized not in _TIER_ALIASES:
+        raise ValueError(f"Unknown tier: {tier!r}. Use 'premium' or 'cheap'.")
+    _LLM_TIER = normalized
+    if normalized == "premium":
+        set_backend("claude_code")
+    else:
+        set_backend("openrouter")
+    log.info("LLM tier set to: %s", normalized)
 
 
 def set_model_profile(profile: str) -> None:
@@ -543,6 +563,9 @@ def set_model_profile(profile: str) -> None:
     normalized = (profile or "fireworks").strip().lower()
     if normalized == "fake":
         backend, model = "fake", "fake"
+    elif normalized in _TIER_ALIASES:
+        set_tier(normalized)
+        return
     elif normalized in _MODEL_ALIASES:
         backend, model = _MODEL_ALIASES[normalized]
     elif normalized.startswith("accounts/"):
@@ -608,6 +631,31 @@ def _cache_path_for(system: str, user: str, json_schema: dict | None,
     return os.path.join(cache_d, f"{key}.json")
 
 
+def _infer_role(context: str | None) -> str:
+    text = (context or "").lower()
+    if any(tok in text for tok in ("prose", "writing", "namecard")):
+        return "writing"
+    if any(tok in text for tok in ("judge", "semantic", "validation", "eval", "loop_judge")):
+        return "eval"
+    return "coding"
+
+
+def _route_for_role(role: str) -> ModelRoute:
+    tier = (_LLM_TIER or "cheap") if _LLM_BACKEND == "openrouter" else (_LLM_TIER or "")
+    if _LLM_BACKEND == "claude_code":
+        return ModelRoute(provider="claude_code", model=None, source="claude_code")
+    if _LLM_BACKEND == "openrouter" or tier in ("cheap", "premium"):
+        if role == "writing":
+            return get_writing_llm_model(tier or "cheap")
+        if role == "eval":
+            return get_eval_model(tier or "cheap")
+        return get_coding_llm_model(tier or "cheap")
+    model = _LLM_MODEL
+    if model is None:
+        model = os.environ.get("FIREWORKS_MODEL", "accounts/fireworks/models/glm-5p1")
+    return ModelRoute(provider=_LLM_BACKEND, model=model, source=_LLM_BACKEND)
+
+
 def invalidate_cached_response(system: str, user: str, json_schema: dict | None,
                                reasoning_effort: str | None) -> None:
     """Drop a cached response that failed parse/schema validation — otherwise
@@ -619,7 +667,8 @@ def invalidate_cached_response(system: str, user: str, json_schema: dict | None,
 
 
 def _call_llm(system: str, user: str, params: Params, json_schema: dict | None = None,
-              reasoning_effort: str | None = None, cacheable: bool = True) -> str:
+              reasoning_effort: str | None = None, cacheable: bool = True,
+              role: str | None = None) -> str:
     """Dispatch LLM call to the configured backend (with optional disk cache).
 
     cacheable=False for fix/validate loop calls: those loops rely on sampling
@@ -639,6 +688,10 @@ def _call_llm(system: str, user: str, params: Params, json_schema: dict | None =
 
     if _LLM_BACKEND == "claude_code":
         result = _call_llm_claude_code(system, user, params, json_schema=json_schema)
+    elif _LLM_BACKEND == "openrouter":
+        result = _call_llm_openrouter(system, user, params, json_schema=json_schema,
+                                      reasoning_effort=reasoning_effort,
+                                      role=role or "coding")
     elif _LLM_BACKEND == "anthropic":
         result = _call_llm_anthropic(system, user, params, json_schema=json_schema,
                                      reasoning_effort=reasoning_effort)
@@ -882,6 +935,115 @@ def _call_llm_anthropic(
             else:
                 time.sleep(min(30, 2 ** attempt))
     raise RuntimeError(f"Anthropic call failed after {LLM_RETRY_ATTEMPTS} attempts")
+
+
+def _call_llm_openrouter(
+    system: str, user: str, params: Params, json_schema: dict | None = None,
+    reasoning_effort: str | None = None, role: str = "coding",
+) -> str:
+    """Call OpenRouter's OpenAI-compatible chat completions endpoint."""
+    import httpx
+
+    params.use_llm_call()
+
+    api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("OPENROUTER_API_KEY not set")
+
+    route = _route_for_role(role)
+    model = route.model or "openrouter/free"
+    models = [model, *route.fallbacks]
+
+    for attempt in range(LLM_RETRY_ATTEMPTS):
+        try:
+            payload = {
+                "model": model,
+                "models": models,
+                "max_tokens": int(os.environ.get("HARNESS_MAX_TOKENS", "32000")),
+                "temperature": 0.2 if json_schema is not None else 1.0,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+            }
+            if reasoning_effort:
+                payload["reasoning"] = {"effort": reasoning_effort}
+            if json_schema is not None:
+                payload["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "HarnessOutput",
+                        "schema": json_schema,
+                        "strict": True,
+                    },
+                }
+
+            response = httpx.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=httpx.Timeout(
+                    connect=30.0,
+                    read=float(os.environ.get("HARNESS_READ_TIMEOUT_S", "300")),
+                    write=30.0, pool=30.0,
+                ),
+            )
+            response.raise_for_status()
+            data = response.json()
+            choice = data["choices"][0]
+            finish_reason = choice.get("finish_reason", "")
+            if finish_reason == "length":
+                log.warning("OpenRouter response truncated (hit max_tokens).")
+            content = choice["message"]["content"]
+            usage = data.get("usage", {})
+            used_model = data.get("model") or choice.get("model") or model
+            log.info(
+                "LLM response: %d chars, finish=%s, model=%s, tokens=%s/%s",
+                len(content) if content else 0,
+                finish_reason,
+                used_model,
+                usage.get("prompt_tokens", "?"),
+                usage.get("completion_tokens", "?"),
+            )
+            if not content or not content.strip():
+                log.warning("OpenRouter returned empty content, retrying...")
+                if attempt < LLM_RETRY_ATTEMPTS - 1:
+                    import time
+                    time.sleep(2 ** attempt)
+                    continue
+            return content
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code if e.response is not None else 0
+            if status not in (429, 500, 502, 503, 504) or attempt == LLM_RETRY_ATTEMPTS - 1:
+                raise
+            log.warning(
+                "OpenRouter transient HTTP %s (attempt %d/%d), retrying",
+                status, attempt + 1, LLM_RETRY_ATTEMPTS,
+            )
+            import time
+            time.sleep(min(30, 2 ** attempt))
+        except (
+            httpx.ReadTimeout,
+            httpx.ConnectTimeout,
+            httpx.ConnectError,
+            httpx.NetworkError,
+            httpx.RemoteProtocolError,
+        ) as e:
+            if attempt == LLM_RETRY_ATTEMPTS - 1:
+                raise
+            log.warning(
+                "OpenRouter transient network error %s (attempt %d/%d), retrying",
+                type(e).__name__, attempt + 1, LLM_RETRY_ATTEMPTS,
+            )
+            import time
+            if isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout)):
+                time.sleep(60)
+            else:
+                time.sleep(min(30, 2 ** attempt))
+    raise RuntimeError(f"OpenRouter call failed after {LLM_RETRY_ATTEMPTS} attempts")
 
 
 # ---------- Backend: Claude Code headless ----------
@@ -1226,6 +1388,7 @@ def _call_json(
     structured: bool = True,
     reasoning_effort: str | None = None,
     cacheable: bool = True,
+    role: str | None = None,
 ) -> Any:
     """Call the LLM for schema-validated JSON with bounded retries."""
     if structured and schema is None:
@@ -1235,11 +1398,12 @@ def _call_json(
     schema = schema if structured else None
     prefer_obj = top_level == "object"
     last_response = ""
+    role = role or _infer_role(context)
     for attempt in range(JSON_RETRY_ATTEMPTS):
         attempt_context = context if attempt == 0 else f"{context}_retry_{attempt + 1}"
         response = _call_llm(system, user, params, json_schema=schema,
                              reasoning_effort=reasoning_effort,
-                             cacheable=cacheable)
+                             cacheable=cacheable, role=role)
         last_response = response
         _save_debug_response(attempt_context, response)
         data = _try_parse_json(response, prefer_obj, top_level, context)

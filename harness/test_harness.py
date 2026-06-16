@@ -23,6 +23,7 @@ from harness.graph_ops import build_goal, choose_expansion_type, merge, rank_edg
 from harness.validation import validate, validate_deterministic
 from harness.checkpoint import checkpoint, write
 from harness.chunker import build_chapter_index, chunk_story, sample_for_bible
+from harness.tiers import get_coding_llm_model, get_eval_model, get_writing_llm_model
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -760,12 +761,15 @@ SMALL_INSTRUCTION = """制作一个3-5个节点的互动故事，基于这个古
 
 def test_integration():
     """Full integration test with a small story."""
-    api_key = os.environ.get("FIREWORKS_API_KEY")
+    api_key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("FIREWORKS_API_KEY")
     if not api_key:
-        log.warning("⚠ Skipping integration test: FIREWORKS_API_KEY not set")
+        log.warning("⚠ Skipping integration test: OPENROUTER_API_KEY/FIREWORKS_API_KEY not set")
         return
 
     from harness.harness import build
+    from harness.llm import set_tier
+
+    set_tier("cheap")
 
     params = Params(
         target_playthrough_min=8,
@@ -799,6 +803,58 @@ def test_integration():
     assert len(endings) >= 1, "Need at least one ENDING"
 
     log.info("\n✓ Integration test passed!")
+
+
+def test_tier_routes_premium():
+    route = get_coding_llm_model("premium")
+    assert route.provider == "claude_code"
+    assert route.model is None
+    assert route.fallbacks == ()
+
+
+def test_tier_routes_free_first(monkeypatch):
+    from harness import tiers
+
+    free_models = (
+        {
+            "id": "free/model-a:free",
+            "pricing": {"prompt": "0", "completion": "0", "request": "0"},
+            "supported_parameters": ["json_schema"],
+            "context_length": 64000,
+            "created": 10,
+        },
+        {
+            "id": "free/model-b:free",
+            "pricing": {"prompt": "0", "completion": "0", "request": "0"},
+            "supported_parameters": [],
+            "context_length": 32000,
+            "created": 20,
+        },
+        {
+            "id": "free/model-c:free",
+            "pricing": {"prompt": "0", "completion": "0", "request": "0"},
+            "supported_parameters": [],
+            "context_length": 16000,
+            "created": 30,
+        },
+    )
+
+    monkeypatch.setattr(tiers, "_cached_free_models", lambda *a, **k: free_models)
+    route = get_writing_llm_model("cheap")
+    assert route.provider == "openrouter"
+    assert route.model == "free/model-a:free"
+    assert "free/model-b:free" in route.fallbacks
+    assert "openrouter/free" in route.fallbacks
+
+
+def test_tier_routes_openrouter_fallback(monkeypatch):
+    from harness import tiers
+
+    monkeypatch.setattr(tiers, "_cached_free_models", lambda *a, **k: ())
+    route = get_eval_model("cheap")
+    assert route.provider == "openrouter"
+    assert route.model == "openrouter/free"
+    assert route.fallbacks[0] == "openrouter/auto"
 
 
 # ============================================================

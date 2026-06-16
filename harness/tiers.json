@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "tiers": {
+    "premium": {
+      "roles": {
+        "coding": {
+          "provider": "claude_code"
+        },
+        "writing": {
+          "provider": "claude_code"
+        },
+        "eval": {
+          "provider": "claude_code"
+        }
+      }
+    },
+    "cheap": {
+      "cache_ttl_s": 900,
+      "roles": {
+        "coding": {
+          "provider": "openrouter",
+          "min_context": 32000,
+          "sort": "throughput-high-to-low",
+          "free_candidate_count": 3,
+          "router_fallbacks": ["openrouter/free", "openrouter/auto"]
+        },
+        "writing": {
+          "provider": "openrouter",
+          "min_context": 16000,
+          "sort": "throughput-high-to-low",
+          "free_candidate_count": 3,
+          "router_fallbacks": ["openrouter/free", "openrouter/auto"]
+        },
+        "eval": {
+          "provider": "openrouter",
+          "min_context": 16000,
+          "sort": "latency-low-to-high",
+          "free_candidate_count": 3,
+          "router_fallbacks": ["openrouter/free", "openrouter/auto"]
+        }
+      }
+    }
+  }
+}

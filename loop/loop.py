@@ -3,14 +3,14 @@
 
 A ratcheted hill-climber, per loop/AGENTS.md:
   STEP 1 propose (opencode-qwen, read-only) → STEP 2 apply (opencode-qwen, edits)
-  → verify (tests + fake + a real --mini per fixture, evaluated by Fireworks deepseek)
+  → verify (tests + fake + a real --mini per fixture, evaluated by OpenRouter cheap tier)
   → score vs loop/quality_eval.md → keep ONLY if mean >= best-so-far AND per-genre
   floor holds AND green AND no protected/schema edits, else git revert.
 
 Runs on branch `loop/auto`, never main, never pushes. Ctrl-C safe (state is on disk).
 
     python -m loop.loop [--max-iters 30 --patience 5 --branch loop/auto
-                         --fast-only --model deepseek --dry-run]
+                         --fast-only --model cheap --dry-run]
 """
 from __future__ import annotations
 
@@ -226,8 +226,8 @@ def _launch_mini(story, model):
     logpath = STATE / f"mini_{safe}.log"
     env = {**os.environ, "HARNESS_PROSE_WORKERS": "1", "HARNESS_INGEST_WORKERS": "1"}
     lf = open(logpath, "w")
-    p = subprocess.Popen([sys.executable, "-m", "harness", story, "--mini", "--model",
-                          model, "--no-upload", "-v"], cwd=ROOT, stdout=lf,
+    p = subprocess.Popen([sys.executable, "-m", "harness", story, "--mini", "--tier",
+                          "cheap", "--no-upload", "-v"], cwd=ROOT, stdout=lf,
                          stderr=subprocess.STDOUT, text=True, env=env,
                          start_new_session=True)  # own process group → killable as a unit
     _ACTIVE_MINIS.append(p)
@@ -287,7 +287,7 @@ def _run_full_fixture(story, chapters, model):
     if chapters:
         cmd += ["--chapters", chapters]
     cmd += ["--playthrough", "55", "--total", "100", "--min-endings", "3",
-            "--model", model, "--no-upload"]
+            "--tier", "cheap", "--no-upload"]
     lf = open(logpath, "w")
     p = subprocess.Popen(cmd, cwd=ROOT, stdout=lf, stderr=subprocess.STDOUT,
                          text=True, env=env, start_new_session=True)
@@ -694,7 +694,7 @@ def main():
     ap.add_argument("--max-iters", type=int, default=30)
     ap.add_argument("--patience", type=int, default=5, help="stop after N no-improve iters")
     ap.add_argument("--branch", default="loop/auto")
-    ap.add_argument("--model", default="deepseek", help="model for real --mini + judge")
+    ap.add_argument("--model", default="cheap", help="model profile for real --mini + judge")
     ap.add_argument("--fast-only", action="store_true", help="skip real --mini; gate on tests + det eval")
     ap.add_argument("--epsilon", type=float, default=3.0,
                     help="per-story floor tolerance: a genre may dip this far below its best (absorbs judge noise)")

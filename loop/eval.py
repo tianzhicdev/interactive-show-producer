@@ -329,7 +329,7 @@ def main():
     ap.add_argument("--log", default="")
     ap.add_argument("--min-ch", type=int, default=1)
     ap.add_argument("--no-judge", action="store_true")
-    ap.add_argument("--model", default="deepseek")
+    ap.add_argument("--model", default="cheap")
     ap.add_argument("--full", action="store_true",
                     help="Score a full run via the deterministic report card")
     ap.add_argument("--json", action="store_true")
