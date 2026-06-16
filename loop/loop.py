@@ -505,9 +505,13 @@ def main():
         print(f"\n===== iteration {it}/{a.max_iters} (best_mean={best.get('mean')}, "
               f"no_improve={no_improve}) =====\n[loop] item: {_item_text(item)}")
 
-        # STEP 2 — APPLY one item (opencode-qwen, edits enabled)
+        # STEP 2 — APPLY one item (opencode-qwen, edits enabled).
+        # Judge only what the AGENT changed: subtract files already dirty before apply
+        # (e.g. the loop's own save_plan() write of plan.json) so the loop's bookkeeping
+        # can never trip the protected-files guard. (plan/best/ledger are also gitignored.)
+        pre = set(changed_files())
         apply_change(item)
-        files = changed_files()
+        files = [f for f in changed_files() if f not in pre]
         if not files:
             print("[loop] apply made no change; skipping."); no_improve += 1
             ledger_append({"iter": it, "title": _item_text(item), "verdict": "noop"}); continue
