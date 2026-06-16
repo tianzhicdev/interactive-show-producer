@@ -15,10 +15,12 @@ Runs on branch `loop/auto`, never main, never pushes. Ctrl-C safe (state is on d
 from __future__ import annotations
 
 import argparse
+import atexit
 import fnmatch
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -143,15 +145,31 @@ def fast_verify():
     return True, "fast verify green"
 
 
+_ACTIVE_MINIS: list = []  # Popen children — killed on loop exit/signal so a kill
+                          # of the loop never orphans minis that keep hitting Fireworks.
+
+
+def _kill_active_minis(*_a):
+    import signal as _sig
+    for p in _ACTIVE_MINIS:
+        try:
+            os.killpg(os.getpgid(p.pid), _sig.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    _ACTIVE_MINIS.clear()
+
+
 def _launch_mini(story, model):
-    """Start one real --mini as a detached process. Returns (story, Popen, logpath)."""
+    """Start one real --mini as a detached process group. Returns (story, Popen, logpath)."""
     safe = re.sub(r"[^A-Za-z0-9]+", "_", os.path.basename(story))[:40]
     logpath = STATE / f"mini_{safe}.log"
     env = {**os.environ, "HARNESS_PROSE_WORKERS": "1", "HARNESS_INGEST_WORKERS": "1"}
     lf = open(logpath, "w")
     p = subprocess.Popen([sys.executable, "-m", "harness", story, "--mini", "--model",
                           model, "--no-upload", "-v"], cwd=ROOT, stdout=lf,
-                         stderr=subprocess.STDOUT, text=True, env=env)
+                         stderr=subprocess.STDOUT, text=True, env=env,
+                         start_new_session=True)  # own process group → killable as a unit
+    _ACTIVE_MINIS.append(p)
     return story, p, logpath, lf
 
 
@@ -191,6 +209,7 @@ def real_eval_all(fixtures, model, use_judge):
         per_story[story] = res["score"] if res["score"] is not None else 100.0
         deficiencies += [f"[{base}] {d}" for d in res["deficiencies"]]
     mean = round(sum(per_story.values()) / len(per_story), 1) if per_story else 0.0
+    _ACTIVE_MINIS.clear()  # all waited on above; none left to orphan
     return {"mean": mean, "per_story": per_story, "deficiencies": deficiencies, "failed": failed}
 
 
@@ -286,6 +305,11 @@ def revert_worktree():
 
 
 def main():
+    # Never orphan mini subprocesses if the loop is interrupted/killed.
+    atexit.register(_kill_active_minis)
+    for _s in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(_s, lambda *_a: (_kill_active_minis(), sys.exit(130)))
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--max-iters", type=int, default=30)
     ap.add_argument("--patience", type=int, default=5, help="stop after N no-improve iters")
