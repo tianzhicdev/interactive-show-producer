@@ -3,14 +3,16 @@
 A supervised hill-climbing loop that incrementally improves the harness. Each round it
 **proposes a ranked PLAN** of *every* improvement it considers important — any size, any
 category (plot-quality, real bug-fixes, **speed, refactors, robustness, better-fit
-models**) — then **applies one item per iteration** with a headless **`opencode-qwen`**
-agent (Qwen3-Coder via OpenRouter), verifies it (unit + fake + a **real** `--mini` per
-fixture **evaluated by Fireworks deepseek**), and **keeps the change only if it didn't
-regress** the measured plot quality.
+models**) — **applies the whole plan** with a headless **`opencode-qwen`** agent
+(Qwen3-Coder via OpenRouter), verifies it (unit + fake + a **real** `--mini` per fixture
+**evaluated by Fireworks deepseek**), and **keeps the largest subset that didn't regress**
+the measured plot quality.
 
-It is NOT limited to small prompt tweaks. An item may be a large, multi-file change; only
-ONE item is applied per iteration so its effect on the eval is attributable and cleanly
-revertable. The full plan is surfaced up front in `loop/state/plan.json`.
+It is NOT limited to small prompt tweaks, and it is NOT one-change-at-a-time. The whole
+plan is applied as a bundle and evaluated in ONE pass (fast; reaches the big items).
+**Only if the bundle regresses** does it **bisect** — splitting the plan to isolate and
+drop the culprit while keeping the rest. Items are grouped by the files they touch so any
+subset can be rebuilt conflict-free (file-disjoint groups, cherry-picked onto base).
 
 Tooling split: **opencode-qwen** does the code edits (steps 1–2); **Fireworks
 deepseek** runs the mini generations + the plot judge (step 3). They are separate
@@ -32,8 +34,14 @@ a fixed, human-owned objective and hard anti-cheating guardrails.
               JSON PLAN of every change worth doing now — each tagged with a category
               (plot-quality | bug-fix | speed | refactor | robustness | model), target
               files, the change, rationale, expected impact, priority. Saved to plan.json.
-2. APPLY    — pop the top item; `opencode-qwen run ... --dangerously-skip-permissions`
-              applies exactly that ONE item as a coherent diff (may be large). harness/ only.
+2. APPLY    — `opencode-qwen run ... --dangerously-skip-permissions` applies EVERY plan
+              item (each its own cumulative commit). Items targeting only protected files
+              are pre-filtered; no-op and guard-violating items are dropped + logged.
+2b.GROUP    — group the surviving items by the files they touch (file-disjoint groups).
+3. BISECT   — evaluate the whole bundle in ONE pass. If it holds (no regression, tests
+              green, per-genre floor ok) → keep ALL. If it regresses → split groups and
+              re-evaluate to isolate the culprit(s); keep the largest accepted subset.
+              Memoized so no subset is evaluated twice; bounded eval budget.
 3. GUARD    — if the diff touched any PROTECTED file → revert + log "protected".
               If gate H (no hardcoded story content) fails → revert + log "gate-H".
 4. VERIFY-FAST — `pytest harness/` + a fake-LLM full run + fake mini.
