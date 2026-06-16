@@ -60,11 +60,16 @@ deleting the exam. Listed in `loop/protected.txt`; enforced by the GUARD step.
 - `loop/**` — the loop's own machinery (no self-modification)
 - `harness/test_*.py` — can't pass tests by weakening them
 - `harness/fake_llm.py` — can't force green by tweaking canned output
-- `harness/validation.py` — D-checks are gates; can't loosen to "pass"
-- `harness/AGENTS.md`, `harness/VALIDATION.md`, `harness/CREATIVE_WRITING*.md`,
-  `harness/CHOICE_DESIGN.md` — the harness spec; can't soften the rules
-- JSON schema definitions in `harness/llm.py` — can't relax to pass
-  (schemas may be *tightened* only via a human-reviewed proposal, never by the loop)
+- `harness/validation.py` — D-check gates; can't loosen to "pass"
+- `harness/VALIDATION.md` (S-judge rules), `harness/CHOICE_DESIGN.md` &
+  `harness/DRAMATIC_STRUCTURE.md` (rules the judge/validators grade against),
+  `harness/AGENTS.md` — the GRADING and the spec; can't soften what's measured
+- JSON schema definitions in `harness/llm.py` — locked by the schema-edit guard
+
+**Editable** (the generation dials the loop SHOULD turn to raise plot quality — it
+can't cheat, since weakening them lowers the judge's score and gets reverted):
+`harness/CREATIVE_WRITING_PROSE.md`, `harness/CREATIVE_WRITING_SKELETON.md`, and the
+prompt builders in `harness/llm.py` / `harness/metadata_fill.py`.
 
 > The loop MAY *propose* changes to protected files — those go to a human-review
 > queue (`loop/state/needs_human.md`), never auto-applied.

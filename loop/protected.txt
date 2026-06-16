@@ -7,15 +7,22 @@
 # schema-edit guard in loop.py (schema_edit_violation): any diff that touches a
 # _*_SCHEMA definition or schema-structural key in llm.py is reverted.
 
+# PROTECTED = the GOAL, the GATES, and the GRADING (so the loop can't cheat).
+# NOT protected = the generation HOW (prose/skeleton instructions + llm.py prompt
+# builders) — the loop SHOULD improve those; it can't cheat because the judge +
+# validators below are protected (a weakened instruction → worse output → lower
+# judge score → reverted).
 loop/*
 loop/**
-harness/test_*.py
-harness/fake_llm.py
-harness/validation.py
-harness/AGENTS.md
-harness/VALIDATION.md
-harness/CREATIVE_WRITING.md
-harness/CREATIVE_WRITING_SKELETON.md
-harness/CREATIVE_WRITING_PROSE.md
-harness/CHOICE_DESIGN.md
-harness/DRAMATIC_STRUCTURE.md
+harness/test_*.py            # can't pass tests by weakening them
+harness/fake_llm.py          # can't force green by editing canned output
+harness/validation.py        # D-check gates
+harness/VALIDATION.md         # the semantic-judge (S-check) rules — grading
+harness/CHOICE_DESIGN.md      # choice rules the judge scores against — grading
+harness/DRAMATIC_STRUCTURE.md # dramaturgy rules consumed by validators — grading
+harness/AGENTS.md             # the harness spec / "One Rule"
+
+# Editable by the loop (the generation dials it tunes to raise plot quality):
+#   harness/CREATIVE_WRITING_PROSE.md, harness/CREATIVE_WRITING_SKELETON.md,
+#   harness/CREATIVE_WRITING.md, and the prompt builders in harness/llm.py
+#   (schemas in llm.py stay locked via the schema-edit guard).

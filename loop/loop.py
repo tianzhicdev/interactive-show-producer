@@ -46,8 +46,8 @@ def git(*args):
 def protected_globs():
     out = []
     for line in (LOOP / "protected.txt").read_text().splitlines():
-        line = line.strip()
-        if line and not line.startswith("#"):
+        line = line.split("#", 1)[0].strip()  # drop full-line AND inline comments
+        if line:
             out.append(line)
     return out
 
