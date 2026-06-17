@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import logging
+import httpx
 
 # Add parent to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -23,6 +24,8 @@ from harness.graph_ops import build_goal, choose_expansion_type, merge, rank_edg
 from harness.validation import validate, validate_deterministic
 from harness.checkpoint import checkpoint, write
 from harness.chunker import build_chapter_index, chunk_story, sample_for_bible
+from harness.tiers import ModelRoute, get_coding_llm_model, get_eval_model, get_writing_llm_model
+from harness import llm as llm_mod
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -760,12 +763,15 @@ SMALL_INSTRUCTION = """制作一个3-5个节点的互动故事，基于这个古
 
 def test_integration():
     """Full integration test with a small story."""
-    api_key = os.environ.get("FIREWORKS_API_KEY")
+    api_key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("FIREWORKS_API_KEY")
     if not api_key:
-        log.warning("⚠ Skipping integration test: FIREWORKS_API_KEY not set")
+        log.warning("⚠ Skipping integration test: OPENROUTER_API_KEY/FIREWORKS_API_KEY not set")
         return
 
     from harness.harness import build
+    from harness.llm import set_tier
+
+    set_tier("cheap")
 
     params = Params(
         target_playthrough_min=8,
@@ -799,6 +805,103 @@ def test_integration():
     assert len(endings) >= 1, "Need at least one ENDING"
 
     log.info("\n✓ Integration test passed!")
+
+
+def test_tier_routes_premium():
+    route = get_coding_llm_model("premium")
+    assert route.provider == "claude_code"
+    assert route.model is None
+    assert route.fallbacks == ()
+
+
+def test_tier_routes_free_first(monkeypatch):
+    from harness import tiers
+
+    free_models = (
+        {
+            "id": "free/model-a:free",
+            "pricing": {"prompt": "0", "completion": "0", "request": "0"},
+            "supported_parameters": ["json_schema"],
+            "context_length": 64000,
+            "created": 10,
+        },
+        {
+            "id": "free/model-b:free",
+            "pricing": {"prompt": "0", "completion": "0", "request": "0"},
+            "supported_parameters": [],
+            "context_length": 32000,
+            "created": 20,
+        },
+        {
+            "id": "free/model-c:free",
+            "pricing": {"prompt": "0", "completion": "0", "request": "0"},
+            "supported_parameters": [],
+            "context_length": 16000,
+            "created": 30,
+        },
+    )
+
+    monkeypatch.setattr(tiers, "_cached_free_models", lambda *a, **k: free_models)
+    route = get_writing_llm_model("cheap")
+    assert route.provider == "openrouter"
+    assert route.model == "free/model-a:free"
+    assert route.fallbacks == ()
+
+
+def test_tier_routes_openrouter_fallback(monkeypatch):
+    from harness import tiers
+
+    monkeypatch.setattr(tiers, "_cached_free_models", lambda *a, **k: ())
+    route = get_eval_model("cheap")
+    assert route.provider == "openrouter"
+    assert route.model == "openrouter/free"
+    assert route.fallbacks == ()
+
+
+def test_openrouter_relaxes_schema_on_400(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(llm_mod, "_route_for_role",
+                        lambda role: ModelRoute(provider="openrouter", model="free/model-a:free"))
+
+    calls = []
+
+    class FakeResponse:
+        def __init__(self, status_code, payload=None):
+            self.status_code = status_code
+            self._payload = payload or {}
+            self.request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+            self.text = "bad request" if status_code == 400 else json.dumps(self._payload)
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise httpx.HTTPStatusError("bad request", request=self.request, response=self)
+
+        def json(self):
+            return self._payload
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append(json)
+        if len(calls) == 1:
+            return FakeResponse(400)
+        return FakeResponse(
+            200,
+            {
+                "choices": [{"message": {"content": "{\"ok\": true}"}, "finish_reason": "stop"}],
+                "usage": {},
+                "model": "free/model-a:free",
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    out = llm_mod._call_llm_openrouter(
+        "system",
+        "user",
+        Params(),
+        json_schema={"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]},
+    )
+    assert out == "{\"ok\": true}"
+    assert calls[0]["response_format"]["json_schema"]["schema"]["required"] == ["ok"]
+    assert "response_format" not in calls[1]
 
 
 # ============================================================

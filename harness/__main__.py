@@ -68,6 +68,12 @@ def main():
             "model id (default: glm)"
         ),
     )
+    p.add_argument(
+        "--tier",
+        default="",
+        choices=["", "premium", "cheap"],
+        help="Harness tier: premium uses Claude Code; cheap uses OpenRouter free-first routing",
+    )
     p.add_argument("--cc", action="store_true", help="Alias for --model cc")
     p.add_argument("--resume", default=None, metavar="RUN_DIR",
                    help="Resume from a previous run directory (e.g. harness_output/run_20260605_234041)")
@@ -103,8 +109,13 @@ def main():
     _load_dotenv()
 
     # Backend/model profile
-    from .llm import set_model_profile
-    set_model_profile("cc" if args.cc else args.model)
+    from .llm import set_model_profile, set_tier
+    if args.tier:
+        set_tier(args.tier)
+    elif args.cc:
+        set_model_profile("cc")
+    else:
+        set_model_profile(args.model)
 
     # Read story
     with open(args.story, encoding="utf-8") as f:

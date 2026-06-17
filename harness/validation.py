@@ -426,6 +426,52 @@ def validate_deterministic(
                         suggested_fix="Rewrite labels to parallel grammar and similar length (CHOICE_DESIGN R14)",
                     ))
 
+            # D9: beat role validation — non-ending nodes must have decision_trigger as last non-empty role
+            skel_beats = [el for el in node.skeleton if isinstance(el, dict)]
+            role_beats = [(i, el) for i, el in enumerate(skel_beats) if el.get("role")]
+            if role_beats:
+                last_role_idx, last_role_beat = role_beats[-1]
+                last_role = last_role_beat.get("role")
+                if last_role != "decision_trigger":
+                    violations.append(Violation(
+                        node=nid, check="D9",
+                        problem=(
+                            f"Last non-empty beat role is '{last_role}' (beat {last_role_idx}); "
+                            f"non-ending nodes must end with 'decision_trigger'"
+                        ),
+                        suggested_fix=(
+                            "Mark the final beat that逼出 question as 'decision_trigger' — "
+                            "this beat must cause expectation/result Gap"
+                        ),
+                    ))
+
+            # D9: dramatic Gap validation — non-ending nodes must have expectation/result Gap
+            if node.expectation and node.result:
+                if node.expectation == node.result:
+                    violations.append(Violation(
+                        node=nid, check="D9",
+                        problem="expectation and result are identical — Dramatic Gap requires deviation",
+                        suggested_fix=(
+                            "Rewrite result to depart from expectation (e.g. "
+                            "expectation='主角以为能获得支持' → result='盟友却选择背弃')"
+                        ),
+                    ))
+
+            # D9: charge flip validation — non-ending nodes must have opening_charge != closing_charge
+            if node.opening_charge and node.closing_charge:
+                if node.opening_charge == node.closing_charge:
+                    violations.append(Violation(
+                        node=nid, check="D9",
+                        problem=(
+                            f"opening_charge='{node.opening_charge}' equals closing_charge='{node.closing_charge}' — "
+                            f"non-ending nodes must flip charge (+/-)"
+                        ),
+                        suggested_fix=(
+                            "Set opening_charge and closing_charge to opposite values "
+                            "(e.g. opening_charge='+', closing_charge='-')"
+                        ),
+                    ))
+
             # D9: choice label prefix distinctness (pairwise; supports 3-way fans)
             labels = [c.label for c in node.choices]
             for i in range(len(labels)):

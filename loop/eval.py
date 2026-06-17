@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Score a --mini run against loop/quality_eval.md.
+"""Score a harness run against loop/quality_eval.md or the full-run report card.
 
 Two buckets (judge the OUTPUT, not the process):
   FORMAT  (deterministic): F1 structure/schema, F2 scene format, F3 language.
@@ -7,7 +7,8 @@ Two buckets (judge the OUTPUT, not the process):
           P4 endings, P5 game-mechanics, P6 craft  — rubric in loop/quality_eval.md.
 
 Returns {score 0-100, dimensions, deficiencies}. With --no-judge only the FORMAT
-bucket is scored (normalized over its weight).
+bucket is scored (normalized over its weight). With --full, score a full run via
+the deterministic report card instead of the mini plot rubric.
 
     python -m loop.eval <run_dir> [--log <p>] [--min-ch N] [--no-judge] [--model M] [--json]
 """
@@ -40,6 +41,81 @@ def _headers(n):
 
 def _score(pts, total):
     return round(10 * pts / total, 1) if total else 0.0
+
+
+def _score_full_report(rep: dict) -> tuple[float, list[str], dict]:
+    """Deterministic score for a full run.
+
+    This is intentionally coarser than the mini plot judge: it rewards the
+    things that make long runs survive and stay healthy.
+    """
+    deficiencies: list[str] = []
+    dims = {}
+    score = 100.0
+
+    gates = rep.get("gates", {}) or {}
+    structure = rep.get("structure", {}) or {}
+    pacing = rep.get("pacing", {}) or {}
+    choices = rep.get("choices", {}) or {}
+
+    gate_weights = {
+        "D13_convergence_floor": 20.0,
+        "D15_dead_end_ratio": 20.0,
+        "D14_fork_reconvergence": 20.0,
+        "W2_residual_pairs": 10.0,
+    }
+    gate_score = 10.0
+    total_gate_weight = 0.0
+    for name, weight in gate_weights.items():
+        g = gates.get(name)
+        if g is None:
+            continue
+        total_gate_weight += weight
+        if g.get("pass"):
+            gate_score += weight
+        else:
+            deficiencies.append(
+                f"FULL: gate {name} failed ({g.get('value')} / {g.get('threshold')})"
+            )
+    gate_score = round(10 * gate_score / (10 + total_gate_weight), 1) if total_gate_weight else 10.0
+    dims["GATES"] = gate_score
+
+    # Pacing: reward a run that actually reaches the intended shortest path
+    # without collapsing into a speedrun, and keep the penalty soft.
+    floor = 0.85 * 55.0
+    shortest = float(pacing.get("shortest_playthrough_min", 0.0) or 0.0)
+    if shortest < floor:
+        shortfall = (floor - shortest) / floor if floor else 1.0
+        penalty = min(25.0, round(shortfall * 25.0, 1))
+        score -= penalty
+        deficiencies.append(
+            f"FULL: shortest playthrough {shortest:.1f}min < floor {floor:.1f}min"
+        )
+    dims["PACE"] = round(max(0.0, 10.0 - max(0.0, floor - shortest) / floor * 10.0), 1) if floor else 10.0
+
+    # Choice quality: same-target pairs are acceptable only as state writes;
+    # too many of them usually means the graph is collapsing forks.
+    same_target = int(choices.get("same_target_pairs", 0) or 0)
+    if same_target:
+        penalty = min(15.0, same_target * 5.0)
+        score -= penalty
+        deficiencies.append(f"FULL: {same_target} same-target choice pair(s)")
+    sim_q = int(choices.get("similar_question_pair_count", 0) or 0)
+    if sim_q:
+        penalty = min(10.0, sim_q * 1.5)
+        score -= penalty
+        deficiencies.append(f"FULL: {sim_q} similar question pair(s)")
+    dims["CHOICES"] = max(0.0, 10.0 - min(10.0, same_target * 2.0 + sim_q * 0.5))
+
+    # Structural richness: nudge toward graphs that actually converge and stay
+    # within the intended long-run shape.
+    if structure.get("node_count", 0) >= 8 and structure.get("convergence_count", 0) < 1:
+        score -= 10.0
+        deficiencies.append("FULL: no convergence node on a graph of meaningful size")
+    dims["STRUCT"] = max(0.0, 10.0 - (10.0 if structure.get("convergence_count", 0) < 1 else 0.0))
+
+    score = round(max(0.0, min(100.0, score)), 1)
+    return score, deficiencies, dims
 
 
 # ---------- FORMAT (deterministic) ----------
@@ -232,17 +308,37 @@ def evaluate(run_dir, log_text="", min_ch=1, use_judge=True, model="deepseek"):
             "deficiencies": deficiencies, "judged": judged}
 
 
+def evaluate_full(run_dir):
+    """Score a completed full run using the deterministic report card."""
+    from harness.metrics import report_from_path
+
+    rep = report_from_path(run_dir)
+    score, deficiencies, dims = _score_full_report(rep)
+    return {
+        "score": score,
+        "format_ok": True,
+        "dimensions": dims,
+        "deficiencies": deficiencies,
+        "judged": False,
+    }
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("run_dir")
     ap.add_argument("--log", default="")
     ap.add_argument("--min-ch", type=int, default=1)
     ap.add_argument("--no-judge", action="store_true")
-    ap.add_argument("--model", default="deepseek")
+    ap.add_argument("--model", default="cheap")
+    ap.add_argument("--full", action="store_true",
+                    help="Score a full run via the deterministic report card")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
-    log_text = Path(a.log).read_text() if a.log and os.path.exists(a.log) else ""
-    res = evaluate(a.run_dir, log_text, a.min_ch, use_judge=not a.no_judge, model=a.model)
+    if a.full:
+        res = evaluate_full(a.run_dir)
+    else:
+        log_text = Path(a.log).read_text() if a.log and os.path.exists(a.log) else ""
+        res = evaluate(a.run_dir, log_text, a.min_ch, use_judge=not a.no_judge, model=a.model)
     if a.json:
         print(json.dumps(res, ensure_ascii=False, indent=2))
     else:

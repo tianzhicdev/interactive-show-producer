@@ -1,14 +1,22 @@
 # loop/AGENTS.md — The Harness Auto-Improvement Loop
 
-A supervised hill-climbing loop that incrementally improves the harness toward
-`loop/quality_eval.md`. It **proposes** one change and **applies** it with a headless
-**`opencode-qwen`** agent (Qwen3-Coder via OpenRouter), verifies it (unit + fake +
-a **real** `--mini` per fixture **evaluated by Fireworks deepseek**), scores the
-result against the goal post, and **keeps the change only if it didn't regress**.
+A supervised hill-climbing loop that incrementally improves the harness. Each round it
+**proposes a ranked PLAN** of *every* improvement it considers important — any size, any
+category (plot-quality, real bug-fixes, **speed, refactors, robustness, better-fit
+models**) — **applies the whole plan** with a headless **`opencode-qwen`** agent
+(Qwen3-Coder via OpenRouter), verifies it (unit + fake + a **real** end-to-end run per
+fixture **scored by `loop/eval.py`**), and **keeps the largest subset that didn't regress**
+the measured plot quality.
 
-Tooling split: **opencode-qwen** does the code edits (steps 1–2); **Fireworks
-deepseek** runs the mini generations + the plot judge (step 3). They are separate
-on purpose — the editor and the grader are different models.
+It is NOT limited to small prompt tweaks, and it is NOT one-change-at-a-time. The whole
+plan is applied as a bundle and evaluated in ONE pass (fast; reaches the big items).
+**Only if the bundle regresses** does it **bisect** — splitting the plan to isolate and
+drop the culprit while keeping the rest. Items are grouped by the files they touch so any
+subset can be rebuilt conflict-free (file-disjoint groups, cherry-picked onto base).
+
+Tooling split: **opencode-qwen** does the code edits (steps 1–2); `loop/eval.py`
+scores the end-to-end runs in step 3. They are separate on purpose — the editor and
+the grader are different components.
 
 It is NOT a "let an AI rewrite the codebase" loop. It is a ratcheted optimizer with
 a fixed, human-owned objective and hard anti-cheating guardrails.
@@ -19,39 +27,57 @@ a fixed, human-owned objective and hard anti-cheating guardrails.
 
 ```
 0. Start clean on the `loop/auto` branch (or a worktree). Baseline = best-so-far.
-1. PROPOSE  — `opencode-qwen run` (read-only: no --dangerously-skip-permissions, so
-              it CANNOT edit headless) examines harness/AGENTS.md, quality_eval.md,
-              the LAST eval's deficiencies, and the tried-ledger, and outputs ONE
-              concrete, scoped proposal (target files + change + why).
-2. APPLY    — `opencode-qwen run ... --dangerously-skip-permissions` applies exactly
-              that proposal as the smallest coherent diff. Edits harness/ only.
+1. PLAN     — when the queue is empty, `opencode-qwen run` (read-only: no
+              --dangerously-skip-permissions, so it CANNOT edit headless) examines
+              harness/AGENTS.md, quality_eval.md, the LAST full-run eval's deficiencies,
+              the tried-ledger, AND recent FAILURES (reason + detail), and emits a ranked
+              JSON PLAN of every change worth doing now — each tagged with a category
+              (plot-quality | bug-fix | speed | refactor | robustness | model), target
+              files, the change, rationale, expected impact, priority. Saved to plan.json.
+              When step 3 shows a failure, step 1 should treat that as the primary
+              bug/robustness input and propose the smallest fix that can move the next
+              full run forward.
+2. APPLY    — `opencode-qwen run ... --dangerously-skip-permissions` applies EVERY plan
+              item (each its own cumulative commit). Items targeting only protected files
+              are pre-filtered; no-op and guard-violating items are dropped + logged.
+2b.GROUP    — group the surviving items by the files they touch (file-disjoint groups).
+3. BISECT   — evaluate the whole bundle in ONE pass. If it holds (no regression, tests
+              green, per-genre floor ok) → keep ALL. If it regresses → split groups and
+              re-evaluate to isolate the culprit(s); keep the largest accepted subset.
+              Memoized so no subset is evaluated twice; bounded eval budget.
 3. GUARD    — if the diff touched any PROTECTED file → revert + log "protected".
               If gate H (no hardcoded story content) fails → revert + log "gate-H".
-4. VERIFY-FAST — `pytest harness/` + a fake-LLM full run + fake mini.
+4. VERIFY-FAST — `pytest harness/` + a fake-LLM full run + a second fake full smoke run.
               Any failure → revert + log "tests".
-5. VERIFY-REAL — run a real `--mini` on **ALL** rotation stories **in parallel**
-              (sub-runs forced to PROSE/INGEST workers = 1 to bound concurrency),
-              then score each with `loop/eval.py` against quality_eval.md.
+5. VERIFY-REAL — run a real end-to-end harness pass on **ALL** rotation stories
+              **in parallel** (sub-runs forced to PROSE/INGEST workers = 1 to bound
+              concurrency), then score each with `loop/eval.py` against quality_eval.md.
               The iteration's signal = the **mean** of the per-story scores.
               Any sub-run that crashes → automatic REJECT (broke a genre).
-6. RATCHET  — keep iff  new_mean ≥ best_mean  AND no genre fell below its floor
-              (best_per_story[g] − ε)  AND tests green AND guards passed:
-                 ACCEPT → commit to `loop/auto`, update best mean + per-story
-                 else:   REVERT → `git reset --hard HEAD` + clean
-7. Feed this round's deficiencies into the next EXAMINE. Repeat.
+6. ACCEPT   — CATEGORY-AWARE (see below). Guards + tests + per-genre floor always
+              required. ACCEPT → commit to `loop/auto`; else REVERT → `git reset
+              --hard HEAD` + clean, and the failure (reason + detail) is logged.
+7. Feed this round's deficiencies AND failures into the next PLAN. Repeat.
 ```
 
-## Acceptance rule (the ratchet)
-The per-iteration signal is the **mean across the FULL rotating set, run in
-parallel** (never one story — that overfits + is high-variance). Keep a change
-ONLY if **both**:
-- `new_mean ≥ best_mean` (the average doesn't drop), AND
-- **no individual genre falls below its own floor** `best_per_story[g] − ε`
-  (default ε=3, absorbs LLM-judge noise; deterministic dims have zero variance).
+## Acceptance rule (category-aware ratchet)
+The per-iteration quality signal is the **mean across the FULL rotating set, run in
+parallel** (never one story — that overfits + is high-variance). Every accepted change
+must keep tests green, pass the guards, and keep **no genre below its floor**
+`best_per_story[g] − ε` (default ε=3, absorbs LLM-judge noise). On top of that:
 
-This lets the average climb while **forbidding a fix that trades one genre for
-another** — the core anti-overfit guarantee. Patience resets only on a *strict*
-mean improvement. Everything else is `git reset --hard`-reverted, zero residue.
+- **plot-quality / bug-fix** items must **improve-or-hold** the mean (`new_mean ≥
+  best_mean`). A strict improvement raises the bar (`best.mean`).
+- **speed / refactor / robustness / model** items need only **NOT regress** quality
+  (`new_mean ≥ best_mean − ε`, floor holds). They do NOT lower `best.mean` (the quality
+  bar is a high-water mark). Their engineering benefit is the proposer's *claim*,
+  recorded in the ledger and **verified by the human at merge** — auto-gating speed on a
+  *real* mini's wall-clock is unreliable (network-latency noise).
+
+This lets quality climb, lets the harness get faster/cleaner without quality loss, and
+**forbids trading one genre for another**. Patience resets on any ACCEPT; everything
+else is `git reset --hard`-reverted, zero residue. The anti-cheat guarantee is intact:
+*the loop can never degrade measured output quality or weaken a test/validator/schema.*
 
 ## PROTECTED files — the loop may NEVER auto-edit these
 The loop is graded against these; letting it edit them = moving the goal posts /
@@ -75,16 +101,19 @@ prompt builders in `harness/llm.py` / `harness/metadata_fill.py`.
 > queue (`loop/state/needs_human.md`), never auto-applied.
 
 ## Scope of changes (what the loop works on)
-1. **AGENTS.md conformance** — code that violates the harness's own invariants
-   (hardcoded story content, non-skeleton plot source, missing schema at a
-   boundary, fallback prose, padding/duplication).
-2. **Curated bug checklist** — seeded in `loop/state/backlog.md` (e.g. deferred
-   items B16/R1/R4 from the manual review). Real, bounded work.
-3. **Eval-driven deficiencies** — whatever the last `--mini` eval flagged as below
-   target in quality_eval.md.
+Anything important to the harness. The proposer ranks across these categories:
+1. **plot-quality** — raise the `quality_eval.md` score (prose/skeleton instructions,
+   prompt builders, eval-driven deficiencies from the last full regression run).
+2. **bug-fix** — real correctness bugs producing wrong/broken output; AGENTS.md
+   conformance (hardcoded content, non-skeleton plot source, fallback prose).
+3. **speed** — faster/cheaper generation (fewer/parallel LLM calls, caching, less work).
+4. **refactor** — code health / maintainability with no behavior change.
+5. **robustness** — error handling, retries, resumability.
+6. **model** — use a better-fitting model for a phase.
 
-NOT in scope: open-ended "find any bug", broad refactors, dependency bumps,
-performance work without a correctness/quality payoff in the rubric.
+Each item still edits **harness/ source only**, never the protected grading/spec/schema
+files. Engineering items (3–6) are gated on quality non-regression + green tests, with
+the benefit confirmed at human review.
 
 ## Anti-reward-hacking invariants (non-negotiable)
 - The fitness signal lives in PROTECTED files; the loop can't touch them.
@@ -108,11 +137,11 @@ Stop when ANY of:
   converged; nothing left to climb with the current rubric/backlog.
 
 ## Cost & cadence (be honest)
-A real `--mini` is ~15–25 min + Fireworks/Agent-SDK credit. With fix + eval, one
+A real end-to-end run is ~15–25 min + judge credit. With fix + eval, one
 iteration ≈ 25–40 min. Overnight ≈ 15–30 iterations. The ratchet matters *more*
 the slower each iteration is — a wrongly-accepted regression is expensive to
-discover. Use `--fast-only` (skip the real `--mini`, gate on tests + deterministic
-eval only) for cheap dry-runs while developing the loop itself.
+discover. Use `--fast-only` (skip the real end-to-end harness pass, gate on tests +
+deterministic eval only) for cheap dry-runs while developing the loop itself.
 
 ## State (loop/state/)
 - `best.json` — best score so far + the commit that achieved it
@@ -123,8 +152,9 @@ eval only) for cheap dry-runs while developing the loop itself.
 
 ## Files
 - `loop.py` — the orchestrator (the while loop above)
-- `eval.py` — runs/parses a `--mini`, scores vs quality_eval.md → (score, deficiencies)
+- `eval.py` — runs/parses the end-to-end harness outputs, scores vs quality_eval.md → (score, deficiencies)
 - `fixtures.txt` — the rotating story set (one path per line; `#` comments)
+- `full_fixtures.txt` — the full-run regression set used for the loop's real signal
 - `protected.txt` — glob list of files the loop may not edit
 - `quality_eval.md` — the objective (PROTECTED)
 
@@ -132,6 +162,7 @@ eval only) for cheap dry-runs while developing the loop itself.
 - Read `loop/state/ledger.jsonl` to see what was tried and why each was kept/cut.
 - Review `loop/auto` before merging to `main`; the loop never merges for you.
 - Edit `quality_eval.md` to change what "better" means; edit `backlog.md` to
-  steer what it works on; edit `fixtures.txt` to change the genre coverage.
+  steer what it works on; edit `fixtures.txt` / `full_fixtures.txt` to change the
+  coverage used for planning and full-run regression.
 - Kill it anytime; state is checkpointed each iteration and it resumes from
   `best.json` + `ledger.jsonl`.
