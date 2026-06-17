@@ -1,5 +1,5 @@
 # Full-run regression set for long-horizon harness health.
 # Format: <story path>|<optional chapter range>
 # Keep this small; these runs are expensive.
-/Users/biubiu/Downloads/番茄IP互动剧本/raw_stories/灵异复苏_第1-34章.txt|1-34
-/Users/biubiu/Downloads/番茄IP互动剧本/raw_stories/灵异复苏_第1-100章.txt|1-100
+raw_stories/灵异复苏_第1-34章.txt|1-34
+raw_stories/灵异复苏_第1-100章.txt|1-100

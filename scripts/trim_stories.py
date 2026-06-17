@@ -29,8 +29,8 @@ def trim_to_chapters(text: str, max_chapters: int) -> str:
 
 def main():
     max_ch = int(sys.argv[1]) if len(sys.argv) > 1 else 10
-    src = Path("/Users/biubiu/Downloads/番茄IP互动剧本/raw_stories")
-    dst = Path("/Users/biubiu/Downloads/番茄IP互动剧本/raw_stories_short")
+    src = Path("raw_stories")
+    dst = Path("raw_stories_input")
     dst.mkdir(exist_ok=True)
 
     for f in sorted(src.glob("*.txt")):
