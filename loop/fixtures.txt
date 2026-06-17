@@ -1,6 +1,5 @@
-# Rotating story set for the real --mini eval (one path per line; # = comment).
-# Keep SHORT (≈3 chapters): --mini extracts the whole-file bible before building
-# from ch 1-2, so long files make every iteration slow. Missing paths are skipped.
+# Rotating story set for the fast deterministic fallback eval (one path per line; # = comment).
+# Keep SHORT. Missing paths are skipped.
 loop/fixtures/romance_3ch.txt
 loop/fixtures/horror_3ch.txt
 loop/fixtures/xianxia_3ch.txt

@@ -3,9 +3,9 @@
 
 A ratcheted hill-climber, per loop/AGENTS.md:
   STEP 1 propose (opencode-qwen, read-only) → STEP 2 apply (opencode-qwen, edits)
-  → verify (tests + fake + a real --mini per fixture, evaluated by OpenRouter cheap tier)
-  → score vs loop/quality_eval.md → keep ONLY if mean >= best-so-far AND per-genre
-  floor holds AND green AND no protected/schema edits, else git revert.
+  → verify (tests + fake + a real full run per fixture, evaluated by the configured
+  judge model) → score vs loop/quality_eval.md → keep ONLY if mean >= best-so-far AND
+  per-genre floor holds AND green AND no protected/schema edits, else git revert.
 
 Runs on branch `loop/auto`, never main, never pushes. Ctrl-C safe (state is on disk).
 
@@ -73,7 +73,11 @@ def protected_globs():
 
 def changed_files():
     _, out = git("status", "--porcelain")
-    return [ln[3:].strip() for ln in out.splitlines() if ln.strip()]
+    files = [ln[3:].strip() for ln in out.splitlines() if ln.strip()]
+    return [
+        f for f in files
+        if not (f.startswith("loop/state/") and f.endswith(".log"))
+    ]
 
 
 def touches_protected(files):
@@ -181,7 +185,7 @@ def _pytest(timeout):
 
 
 def fast_verify():
-    """Unit tests + fake full run + fake mini. Returns (ok, summary).
+    """Unit tests + fake full run + fake full smoke run. Returns (ok, summary).
 
     pytest is flaky under the loop's nohup subprocess context (it passes in ~0.3s
     standalone but has intermittently hung to the timeout). Since a genuine test
@@ -200,46 +204,57 @@ def fast_verify():
     if rc != 0:
         return False, "fake full run failed:\n" + out[-1500:]
     rc, out = sh([sys.executable, "-m", "harness", fix, "--model", "fake",
-                  "--mini", "--no-upload"], timeout=600)
+                  "--playthrough", "8", "--total", "24", "--min-endings", "2",
+                  "--no-upload"], timeout=600)
     if rc != 0:
-        return False, "fake mini failed:\n" + out[-1500:]
+        return False, "fake smoke run failed:\n" + out[-1500:]
     return True, "fast verify green"
 
 
-_ACTIVE_MINIS: list = []  # Popen children — killed on loop exit/signal so a kill
-                          # of the loop never orphans minis that keep hitting Fireworks.
+_ACTIVE_RUNS: list = []  # Popen children — killed on loop exit/signal so a kill
+                          # of the loop never orphans harness jobs.
 
 
-def _kill_active_minis(*_a):
+def _kill_active_runs(*_a):
     import signal as _sig
-    for p in _ACTIVE_MINIS:
+    for p in _ACTIVE_RUNS:
         try:
             os.killpg(os.getpgid(p.pid), _sig.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
-    _ACTIVE_MINIS.clear()
+    _ACTIVE_RUNS.clear()
 
 
-def _launch_mini(story, model):
-    """Start one real --mini as a detached process group. Returns (story, Popen, logpath)."""
+_kill_active_minis = _kill_active_runs
+
+
+def _launch_run(story, model):
+    """Start one real full harness run as a detached process group.
+
+    Returns (story, Popen, logpath)."""
     safe = re.sub(r"[^A-Za-z0-9]+", "_", os.path.basename(story))[:40]
-    logpath = STATE / f"mini_{safe}.log"
+    logpath = STATE / f"run_{safe}.log"
     env = {**os.environ, "HARNESS_PROSE_WORKERS": "1", "HARNESS_INGEST_WORKERS": "1"}
     lf = open(logpath, "w")
-    p = subprocess.Popen([sys.executable, "-m", "harness", story, "--mini", "--tier",
+    p = subprocess.Popen([sys.executable, "-m", "harness", story, "--tier",
                           "cheap", "--no-upload", "-v"], cwd=ROOT, stdout=lf,
                          stderr=subprocess.STDOUT, text=True, env=env,
                          start_new_session=True)  # own process group → killable as a unit
-    _ACTIVE_MINIS.append(p)
+    _ACTIVE_RUNS.append(p)
     return story, p, logpath, lf
 
 
+def _tail_lines(text: str, limit: int = 20) -> str:
+    lines = text.splitlines()
+    return "\n".join(lines[-limit:])
+
+
 def real_eval_all(fixtures, model, use_judge):
-    """Run ALL fixtures' --mini in PARALLEL, then eval each. Returns dict:
+    """Run ALL fixtures in PARALLEL, then eval each. Returns dict:
        {mean, per_story: {fixture: score}, deficiencies, failed: [stories]}.
        The combined per-iteration signal = mean of the rotating set (see AGENTS.md)."""
     from loop.eval import evaluate
-    procs = [_launch_mini(s, model) for s in fixtures]
+    procs = [_launch_run(s, model) for s in fixtures]
     per_story, deficiencies, failed = {}, [], []
     for story, p, logpath, lf in procs:
         try:
@@ -250,7 +265,9 @@ def real_eval_all(fixtures, model, use_judge):
         out = Path(logpath).read_text()
         if p.returncode != 0:
             failed.append(story); per_story[story] = 0.0
-            deficiencies.append(f"[{os.path.basename(story)}] --mini run FAILED"); continue
+            tail = _tail_lines(out, 20)
+            deficiencies.append(f"[{os.path.basename(story)}] full run FAILED\n{tail}")
+            continue
         m = re.findall(r"harness_output/run_[0-9_]+", out)
         run_dir = m[-1] if m else None
         gf = os.path.join(ROOT, run_dir, "graph_final.json") if run_dir else ""
@@ -270,7 +287,7 @@ def real_eval_all(fixtures, model, use_judge):
         per_story[story] = res["score"] if res["score"] is not None else 100.0
         deficiencies += [f"[{base}] {d}" for d in res["deficiencies"]]
     mean = round(sum(per_story.values()) / len(per_story), 1) if per_story else 0.0
-    _ACTIVE_MINIS.clear()  # all waited on above; none left to orphan
+    _ACTIVE_RUNS.clear()  # all waited on above; none left to orphan
     return {"mean": mean, "per_story": per_story, "deficiencies": deficiencies, "failed": failed}
 
 
@@ -291,7 +308,7 @@ def _run_full_fixture(story, chapters, model):
     lf = open(logpath, "w")
     p = subprocess.Popen(cmd, cwd=ROOT, stdout=lf, stderr=subprocess.STDOUT,
                          text=True, env=env, start_new_session=True)
-    _ACTIVE_MINIS.append(p)
+    _ACTIVE_RUNS.append(p)
     try:
         p.wait(timeout=7200)
     except subprocess.TimeoutExpired:
@@ -301,11 +318,12 @@ def _run_full_fixture(story, chapters, model):
         except subprocess.TimeoutExpired:
             pass
     lf.close()
-    _ACTIVE_MINIS[:] = [x for x in _ACTIVE_MINIS if x.pid != p.pid]
+    _ACTIVE_RUNS[:] = [x for x in _ACTIVE_RUNS if x.pid != p.pid]
     out = Path(logpath).read_text()
     label = os.path.basename(story)
     if p.returncode != 0:
-        return story, 0.0, [f"[{label}] full run FAILED"], True
+        tail = _tail_lines(out, 20)
+        return story, 0.0, [f"[{label}] full run FAILED\n{tail}"], True
     m = re.findall(r"harness_output/run_[0-9_]+", out)
     run_dir = m[-1] if m else None
     gf = os.path.join(ROOT, run_dir, "graph_final.json") if run_dir else ""
@@ -400,7 +418,7 @@ def _extract_json_array(text):
     return best
 
 
-def propose_plan(context, n=6, attempts=3):
+def propose_plan(context, n=1, attempts=3):
     """STEP 1 — opencode-qwen examines the harness + the context and proposes a RANKED
     PLAN of ALL improvements it considers critical — any size, any category (not just
     small prompt tweaks). Read-only (no edits possible headless without skip-perms).
@@ -412,8 +430,9 @@ def propose_plan(context, n=6, attempts=3):
 harness/AGENTS.md and the context below, examine the relevant harness/ code, and propose
 a RANKED PLAN of EVERY change you consider important enough to be worth doing now.
 
-Do NOT limit yourself to small prompt tweaks. Propose whatever genuinely improves the
-harness — each item may be large or multi-file. Use these categories:
+Do NOT be vague. Propose one change that is small enough to be accepted and verified
+in one round. If an improvement needs multiple files, split it into the smallest
+independently testable step. Use these categories:
 - "plot-quality"  raise the loop/quality_eval.md PLOT score (prose/skeleton instructions, prompt builders)
 - "bug-fix"       a real correctness bug producing wrong/broken output
 - "speed"         make generation faster or cheaper (fewer/parallel LLM calls, caching, less redundant work)
@@ -433,6 +452,18 @@ HARD CONSTRAINTS every item must respect (state how in "change"):
 - The editable generation dials are: harness/CREATIVE_WRITING_PROSE.md,
   harness/CREATIVE_WRITING_SKELETON.md, the prompt builders in harness/llm.py (NOT its
   schemas) and harness/metadata_fill.py, plus any harness/ source for speed/refactor/robustness.
+- If a change is prompt text, prefer markdown files over .py so gate-H stays clean.
+- Prefer one logical change per item. Do not bundle unrelated prompt rewrites into the same item.
+- Avoid touching both llm.py and a markdown prompt file in the same item unless the code
+  change is purely plumbing and the prompt text stays in markdown.
+- When the most recent full-run evaluation failed, step 1 should treat the failure
+  class from step 3 as the primary input and propose the smallest bug/robustness fix
+  that can move the next full run forward.
+- If the failure is a hard runtime or routing error, prefer bug-fix/robustness over
+  plot-quality until at least one full-run fixture completes successfully.
+- For plot-quality work, only choose prompt edits after the current full-run path is
+  actually executing end to end; do not spend the first recovery step on narration-only
+  changes while the harness is still failing in step 3.
 
 CONTEXT (last eval deficiencies + backlog + already-tried + recent failures to learn from):
 {context}
@@ -542,6 +573,14 @@ def _load_fixtures(path: Path) -> list[dict]:
             line, chapters = [p.strip() for p in line.split("|", 1)]
             chapters = chapters or None
         abs_path = line if os.path.isabs(line) else str(ROOT / line)
+        if not os.path.exists(abs_path):
+            home = str(Path.home())
+            for prefix in ("/Users/biubiu/", "/Users/tianzhichen/"):
+                if abs_path.startswith(prefix):
+                    alt = str(Path(home) / abs_path[len(prefix):].lstrip("/"))
+                    if os.path.exists(alt):
+                        abs_path = alt
+                        break
         if os.path.exists(abs_path):
             items.append({"path": abs_path, "chapters": chapters, "label": os.path.basename(abs_path)})
     return items
@@ -694,8 +733,8 @@ def main():
     ap.add_argument("--max-iters", type=int, default=30)
     ap.add_argument("--patience", type=int, default=5, help="stop after N no-improve iters")
     ap.add_argument("--branch", default="loop/auto")
-    ap.add_argument("--model", default="cheap", help="model profile for real --mini + judge")
-    ap.add_argument("--fast-only", action="store_true", help="skip real --mini; gate on tests + det eval")
+    ap.add_argument("--model", default="cheap", help="model profile for real full-run eval + judge")
+    ap.add_argument("--fast-only", action="store_true", help="skip real full-run eval; gate on tests + det eval")
     ap.add_argument("--epsilon", type=float, default=3.0,
                     help="per-story floor tolerance: a genre may dip this far below its best (absorbs judge noise)")
     ap.add_argument("--no-judge", action="store_true")
@@ -725,6 +764,8 @@ def main():
     if not fixtures:
         print("ERROR: no usable fixtures in loop/fixtures.txt"); sys.exit(1)
     full_fixtures = _load_fixtures(LOOP / "full_fixtures.txt")
+    if not full_fixtures:
+        full_fixtures = [{"path": f, "chapters": None, "label": os.path.basename(f)} for f in fixtures]
 
     def save_best():
         (STATE / "best.json").write_text(json.dumps(best, ensure_ascii=False, indent=2))
@@ -739,10 +780,12 @@ def main():
 
     # Baseline: run ALL fixtures in parallel; the combined signal is their mean.
     if "mean" not in best and not a.fast_only:
-        print(f"[loop] establishing baseline ({len(fixtures)} fixtures in parallel)...")
-        r = real_eval_all(fixtures, a.model, not a.no_judge)
+        print(f"[loop] establishing baseline ({len(full_fixtures)} fixtures in parallel)...")
+        r = real_eval_full_all(full_fixtures, a.model)
         best = {"mean": r["mean"], "per_story": r["per_story"],
-                "commit": git("rev-parse", "HEAD")[1].strip(), "deficiencies": r["deficiencies"]}
+                "commit": git("rev-parse", "HEAD")[1].strip(), "deficiencies": r["deficiencies"],
+                "full_mean": r["mean"], "full_per_story": r["per_story"],
+                "full_deficiencies": r["deficiencies"]}
         save_best()
         print(f"[loop] baseline mean={best['mean']} per_story={best['per_story']}")
     last_defs = best.get("deficiencies", [])
@@ -801,7 +844,7 @@ def main():
 
         def evaluate_subset(subset_metas):
             """Reset to base, cherry-pick this subset (file-disjoint ⇒ no conflicts),
-            verify + eval. Returns (err, new); err set on conflict / tests / mini fail."""
+            verify + eval. Returns (err, new); err set on conflict / tests / run fail."""
             git("reset", "--hard", base); git("clean", "-fd", "harness")
             for m in sorted(subset_metas, key=lambda m: m["idx"]):
                 rc, _ = git("cherry-pick", m["commit"])
@@ -816,31 +859,23 @@ def main():
                               "deficiencies": last_defs, "failed": [],
                               "full_mean": prev_full_mean, "full_per_story": prev_full_per,
                               "full_deficiencies": last_full_defs}
-            new = real_eval_all(fixtures, a.model, not a.no_judge)
+            new = real_eval_full_all(full_fixtures, a.model)
             if new["failed"]:
-                return "mini-failed:" + str(new["failed"]), None
-            if full_fixtures:
-                fr = real_eval_full_all(full_fixtures, a.model)
-                new["full_mean"] = fr["mean"]
-                new["full_per_story"] = fr["per_story"]
-                new["full_deficiencies"] = fr["deficiencies"]
-            else:
-                new["full_mean"] = prev_full_mean
-                new["full_per_story"] = prev_full_per
-                new["full_deficiencies"] = last_full_defs
+                return "full-failed:" + str(new["failed"]), None
+            new["full_mean"] = new["mean"]
+            new["full_per_story"] = new["per_story"]
+            new["full_deficiencies"] = new["deficiencies"]
             return None, new
 
         def accept_subset(metas_subset, new):
-            mini_ok = _accept(metas_subset, new, prev_mean, prev_per, a.epsilon)
-            if not full_fixtures:
-                return mini_ok
+            run_ok = _accept(metas_subset, new, prev_mean, prev_per, a.epsilon)
             full_prev = prev_full_mean
             full_per = prev_full_per
             full_ok = all(new["full_per_story"].get(f, 0.0) >= full_per.get(f, 0.0) - a.epsilon
                           for f in new["full_per_story"])
             is_plot = any(m["item"].get("category") in PLOT_CATS for m in metas_subset)
             full_quality_ok = (new["full_mean"] >= full_prev) if is_plot else (new["full_mean"] >= full_prev - a.epsilon)
-            return mini_ok and full_ok and full_quality_ok
+            return run_ok and full_ok and full_quality_ok
 
         def bisect_groups_full(base, groups, evaluate_subset, prev_mean, prev_per, eps, max_tests=8):
             # Wrapper around the existing bisection that also respects the full-run gate.

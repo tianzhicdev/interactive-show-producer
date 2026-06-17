@@ -31,10 +31,10 @@ the grading; you can only make the harness genuinely better.
 - **P6 (craft)**: 旁白 carries plot/setting; dialogue lacks subtext.
 
 ### Engineering (now in scope — propose when genuinely worth it)
-- **speed**: the `--mini` bible extraction reads the WHOLE novel before building from
-  ch 1–2, making every iteration slow. A scoped extraction (only the chapters used)
-  would cut wall-clock with no quality change.
+- **speed**: the full-run regression set still does extra work in phases that don't
+  affect the eval signal; scope extraction and validation to only the chapters used
+  by the current regression fixtures.
 - **robustness**: harness_output accumulates run dirs unboundedly (3.8G+); a cleanup /
-  TTL for fake + mini runs keeps the FS healthy across long loops.
+  TTL for old runs keeps the FS healthy across long loops.
 - **model**: evaluate whether a cheaper/faster model fits the skeleton phase without
   lowering the judge score (deepseek vs glm vs a smaller model per phase).

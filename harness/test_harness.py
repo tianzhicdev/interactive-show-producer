@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import logging
+import httpx
 
 # Add parent to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -23,7 +24,8 @@ from harness.graph_ops import build_goal, choose_expansion_type, merge, rank_edg
 from harness.validation import validate, validate_deterministic
 from harness.checkpoint import checkpoint, write
 from harness.chunker import build_chapter_index, chunk_story, sample_for_bible
-from harness.tiers import get_coding_llm_model, get_eval_model, get_writing_llm_model
+from harness.tiers import ModelRoute, get_coding_llm_model, get_eval_model, get_writing_llm_model
+from harness import llm as llm_mod
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -843,8 +845,7 @@ def test_tier_routes_free_first(monkeypatch):
     route = get_writing_llm_model("cheap")
     assert route.provider == "openrouter"
     assert route.model == "free/model-a:free"
-    assert "free/model-b:free" in route.fallbacks
-    assert "openrouter/free" in route.fallbacks
+    assert route.fallbacks == ()
 
 
 def test_tier_routes_openrouter_fallback(monkeypatch):
@@ -854,7 +855,53 @@ def test_tier_routes_openrouter_fallback(monkeypatch):
     route = get_eval_model("cheap")
     assert route.provider == "openrouter"
     assert route.model == "openrouter/free"
-    assert route.fallbacks[0] == "openrouter/auto"
+    assert route.fallbacks == ()
+
+
+def test_openrouter_relaxes_schema_on_400(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(llm_mod, "_route_for_role",
+                        lambda role: ModelRoute(provider="openrouter", model="free/model-a:free"))
+
+    calls = []
+
+    class FakeResponse:
+        def __init__(self, status_code, payload=None):
+            self.status_code = status_code
+            self._payload = payload or {}
+            self.request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+            self.text = "bad request" if status_code == 400 else json.dumps(self._payload)
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise httpx.HTTPStatusError("bad request", request=self.request, response=self)
+
+        def json(self):
+            return self._payload
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append(json)
+        if len(calls) == 1:
+            return FakeResponse(400)
+        return FakeResponse(
+            200,
+            {
+                "choices": [{"message": {"content": "{\"ok\": true}"}, "finish_reason": "stop"}],
+                "usage": {},
+                "model": "free/model-a:free",
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    out = llm_mod._call_llm_openrouter(
+        "system",
+        "user",
+        Params(),
+        json_schema={"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]},
+    )
+    assert out == "{\"ok\": true}"
+    assert calls[0]["response_format"]["json_schema"]["schema"]["required"] == ["ok"]
+    assert "response_format" not in calls[1]
 
 
 # ============================================================

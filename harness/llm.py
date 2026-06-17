@@ -953,6 +953,7 @@ def _call_llm_openrouter(
     route = _route_for_role(role)
     model = route.model or "openrouter/free"
     models = [model, *route.fallbacks]
+    relaxed_schema = False
 
     for attempt in range(LLM_RETRY_ATTEMPTS):
         try:
@@ -968,13 +969,12 @@ def _call_llm_openrouter(
             }
             if reasoning_effort:
                 payload["reasoning"] = {"effort": reasoning_effort}
-            if json_schema is not None:
+            if json_schema is not None and not relaxed_schema:
                 payload["response_format"] = {
                     "type": "json_schema",
                     "json_schema": {
                         "name": "HarnessOutput",
                         "schema": json_schema,
-                        "strict": True,
                     },
                 }
 
@@ -1017,6 +1017,13 @@ def _call_llm_openrouter(
             return content
         except httpx.HTTPStatusError as e:
             status = e.response.status_code if e.response is not None else 0
+            if status == 400 and json_schema is not None and not relaxed_schema:
+                log.warning(
+                    "OpenRouter rejected structured output for %s; retrying without response_format",
+                    model,
+                )
+                relaxed_schema = True
+                continue
             if status not in (429, 500, 502, 503, 504) or attempt == LLM_RETRY_ATTEMPTS - 1:
                 raise
             log.warning(

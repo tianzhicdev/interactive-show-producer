@@ -113,9 +113,9 @@ def _fetch_openrouter_models(min_context: int, sort: str) -> list[dict[str, Any]
 
 def _pick_free_candidates(models: list[dict[str, Any]], count: int) -> list[dict[str, Any]]:
     structured = [m for m in models if _supports_structured(m)]
-    others = [m for m in models if not _supports_structured(m)]
-    pool = structured + others
-    return pool[:count]
+    if structured:
+        return structured[:count]
+    return []
 
 
 def _role_route(tier: str, role: str) -> ModelRoute:
@@ -137,13 +137,13 @@ def _role_route(tier: str, role: str) -> ModelRoute:
 
     if candidates:
         primary = candidates[0]
-        fallbacks = tuple(m["id"] for m in candidates[1:]) + router_fallbacks
+        fallbacks = tuple(m["id"] for m in candidates[1:])
         return ModelRoute(provider="openrouter", model=str(primary["id"]), fallbacks=fallbacks,
                           source=f"{tier}:{role}:openrouter-free")
 
     fallback = router_fallbacks[0] if router_fallbacks else "openrouter/free"
     return ModelRoute(provider="openrouter", model=fallback,
-                      fallbacks=tuple(router_fallbacks[1:]), source=f"{tier}:{role}:openrouter-fallback")
+                      fallbacks=(), source=f"{tier}:{role}:openrouter-fallback")
 
 
 @lru_cache(maxsize=64)
