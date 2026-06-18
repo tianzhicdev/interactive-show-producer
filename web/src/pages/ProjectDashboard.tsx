@@ -8,13 +8,12 @@ import { DagOutlineView } from "@/components/DagOutlineView";
 import { SceneEditor } from "@/components/SceneEditor";
 import { ExportPanel } from "@/components/ExportPanel";
 import { ProgressBar } from "@/components/ProgressBar";
-import { WorldSettingsEditor } from "@/components/WorldSettingsEditor";
 import { CharacterEditor } from "@/components/CharacterEditor";
 import { EditableText } from "@/components/EditableText";
 import { Tutorial } from "@/components/Tutorial";
 import { Comments } from "@/components/Comments";
 
-type LeftTab = "graph" | "outline" | "summary" | "world" | "characters" | "comments";
+type LeftTab = "graph" | "outline" | "summary" | "characters" | "comments";
 
 interface StageStatus {
   queued: number;
@@ -69,6 +68,7 @@ export function ProjectDashboard() {
   } = useProject(projectId);
 
   const [leftTab, setLeftTab] = useState<LeftTab>("graph");
+  const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [selectedNodeKey, setSelectedNodeKey] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [multiSelectMode, setMultiSelectMode] = useState(false);
@@ -215,7 +215,7 @@ export function ProjectDashboard() {
             title="编辑与审核互动剧大纲"
             steps={[
               "点击图形中的节点查看和编辑场景详情",
-              "在下方面板编辑故事总结、世界观和角色设定",
+              "在下方面板编辑故事总结和角色设定",
               "悬停任何内容区域会出现「编辑」按钮",
               "满意后点击「批准 Phase 1」→「开始生成剧本」进入下一阶段",
             ]}
@@ -242,14 +242,23 @@ export function ProjectDashboard() {
 
       {/* Main Content — left 1/3 tabs, right 2/3 script */}
       <div className="flex-1 flex min-h-0">
+        {/* Collapsed rail: a thin button to reopen the left panel */}
+        {leftCollapsed && (
+          <button
+            onClick={() => setLeftCollapsed(false)}
+            title="展开左侧面板"
+            className="shrink-0 w-7 border-r bg-white text-gray-400 hover:bg-gray-50 hover:text-gray-600 flex items-center justify-center"
+          >
+            <span className="[writing-mode:vertical-rl] text-xs tracking-wider">» 展开面板</span>
+          </button>
+        )}
         {/* Left Panel: unified tabs */}
-        <div className="w-1/3 min-w-[320px] flex flex-col border-r bg-white">
+        <div className={`${leftCollapsed ? "hidden" : "w-1/3 min-w-[320px] flex"} flex-col border-r bg-white`}>
           <div className="bg-white border-b px-3 py-1.5 flex items-center gap-1 flex-wrap shrink-0">
             {([
               ["graph", "图形"],
               ["outline", "大纲"],
               ["summary", "总结"],
-              ["world", "世界观"],
               ["characters", "角色"],
               ["comments", "评论"],
             ] as [LeftTab, string][]).map(([tab, label]) => (
@@ -261,7 +270,13 @@ export function ProjectDashboard() {
                 {label}
               </button>
             ))}
-            {/* 批量选择 — hidden for now */}
+            <button
+              onClick={() => setLeftCollapsed(true)}
+              title="隐藏左侧面板"
+              className="ml-auto px-2 py-1 rounded text-sm text-gray-400 hover:bg-gray-50 hover:text-gray-600"
+            >
+              «
+            </button>
           </div>
           <div className="flex-1 min-h-0 overflow-auto">
             {leftTab === "graph" && (
@@ -296,15 +311,6 @@ export function ProjectDashboard() {
                     await apiPost("update-story-summary", { project_id: projectId, content });
                     fetchOutline();
                   }}
-                />
-              </div>
-            )}
-            {leftTab === "world" && (
-              <div className="p-4">
-                <WorldSettingsEditor
-                  projectId={projectId}
-                  data={outline?.world_settings as Record<string, unknown> | null}
-                  onUpdate={fetchOutline}
                 />
               </div>
             )}
